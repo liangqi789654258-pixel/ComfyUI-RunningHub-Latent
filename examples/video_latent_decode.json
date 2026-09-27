@@ -1,0 +1,214 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "RunningHubLatentGenerator",
+      "pos": [
+        60,
+        60
+      ],
+      "size": [
+        460,
+        430
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "task_id",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RunningHubLatentGenerator"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "[\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{positive}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{negative}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"seed\",\n    \"fieldValue\": \"{seed}\"\n  }\n]",
+        "a cinematic shot, camera slowly moves forward",
+        "blurry, watermark, flicker",
+        0,
+        1800,
+        5.0,
+        true,
+        false
+      ]
+    },
+    {
+      "id": 2,
+      "type": "VAELoader",
+      "pos": [
+        60,
+        540
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            2
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "wan_2.1_vae.safetensors"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "VAEDecode",
+      "pos": [
+        580,
+        120
+      ],
+      "size": [
+        250,
+        60
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 1
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            3
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 4,
+      "type": "SaveImage",
+      "pos": [
+        890,
+        120
+      ],
+      "size": [
+        280,
+        280
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "RH_Video"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "Note",
+      "pos": [
+        60,
+        660
+      ],
+      "size": [
+        620,
+        300
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Note"
+      },
+      "widgets_values": [
+        "视频 latent 是 5 维张量 [B, C, F, H, W]，必须接「支持视频的 VAE」\n（例如 Wan 系列自带的 VAE），用 SD1.5/SDXL 的 VAE 解码会直接报错或出噪点。\n\n这里的 VAEDecode 输出的是帧序列 IMAGE。若想合成视频文件，\n请安装 ComfyUI-VideoHelperSuite，把它换成 VHS_VideoCombine 节点。\n\n帧数越多，解码时中间态的 5D 张量越大。建议先控制在 33~81 帧试跑，\n确认显存够用再往上加。timeout 建议给到 1800 以上。"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      0,
+      "LATENT"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      1,
+      "VAE"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

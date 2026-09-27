@@ -1,0 +1,8 @@
+{
+  "_说明": "复制本文件为 config.json 后填写。config.json 已被 .gitignore 忽略，绝不会误传仓库。",
+  "api_key": "",
+  "base_url": "https://www.runninghub.cn",
+  "default_workflow_id": "",
+  "timeout": 600,
+  "poll_interval": 5
+}

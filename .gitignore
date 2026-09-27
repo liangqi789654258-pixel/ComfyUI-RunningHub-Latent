@@ -1,0 +1,9 @@
+# API Key 属个人凭证，务必不要提交
+config.json
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+*.log
