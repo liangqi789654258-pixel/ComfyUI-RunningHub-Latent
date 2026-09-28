@@ -36,6 +36,12 @@ except Exception:  # 依赖缺失时不要让整个 custom_nodes 加载炸掉
     NODE_CLASS_MAPPINGS = {}
     NODE_DISPLAY_NAME_MAPPINGS = {}
     CATEGORY = "RunningHub"
+    WEB_DIRECTORY = "web"
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
-__version__ = "1.0.0"
+# 前端扩展目录：ComfyUI 会自动把这里面的 js 注入到画布。
+# 用途是把运行期警告（例如提示词占位符没匹配上）在节点上标黄，
+# 纯 Python 做不到给节点上色。
+WEB_DIRECTORY = "web"
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+__version__ = "1.1.0"

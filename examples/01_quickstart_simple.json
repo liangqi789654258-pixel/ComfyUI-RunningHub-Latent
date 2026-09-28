@@ -4,14 +4,14 @@
   "nodes": [
     {
       "id": 1,
-      "type": "RunningHubLatentGenerator",
+      "type": "RunningHubLatentGeneratorSimple",
       "pos": [
         60,
         60
       ],
       "size": [
         460,
-        430
+        460
       ],
       "flags": {},
       "order": 0,
@@ -40,27 +40,28 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "RunningHubLatentGenerator"
+        "Node name for S&R": "RunningHubLatentGeneratorSimple"
       },
       "widgets_values": [
         "",
         "",
-        "[\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{positive}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{negative}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"seed\",\n    \"fieldValue\": \"{seed}\"\n  }\n]",
         "masterpiece, best quality, 1girl, upper body",
         "lowres, bad anatomy, watermark",
         0,
         600,
         5.0,
         true,
-        false
-      ]
+        false,
+        "警告（沿用云端默认提示词）"
+      ],
+      "title": "RH 云端采样 · 极简版（只填工作流ID）"
     },
     {
       "id": 2,
       "type": "VAELoader",
       "pos": [
         60,
-        540
+        570
       ],
       "size": [
         300,
@@ -165,11 +166,11 @@
       "type": "Note",
       "pos": [
         60,
-        660
+        680
       ],
       "size": [
         620,
-        260
+        300
       ],
       "flags": {},
       "order": 4,
@@ -180,7 +181,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "使用前请先完成两件事：\n1) 在 RunningHub 云端工作流的末端接「保存Latent」节点，删除「保存图像」；\n2) 本节点的 workflow_id 必须填云端工作流 URL 里的那串数字 ID。\n\n参数注入写在 node_overrides 里，占位符 {positive} / {negative} / {seed}\n会绑定到本节点对应的输入框。用「RH 工作流参数探查」节点可查看云端\n真实的 nodeId 与 fieldName。\n\nlatent 本身几乎不占显存；显存压力在本地 VAE 解码阶段。\n6G 显存请把下游换成 VAEDecodeTiled，tile_size 设 384~512。"
+        "【极简版 · 三步跑通】\n1) 云端工作流：末端接「保存Latent」，删掉「保存图像」；\n   并在正面提示词框里写 {positive}，负面提示词框里写 {negative}。\n2) 本节点：只填 workflow_id（云端 URL 里的数字 ID）和 API Key；\n   API Key 也可以写进插件目录的 config.ini，这里就能留空。\n3) 执行，latent 回来后交给下面的 VAEDecodeTiled 本地解码。\n\n本节点会自动定位提示词与种子，不用填任何 nodeId。\n如果 report 里出现黄色警告，说明云端没找到占位符标记——按警告提示改云端即可。\n\n6G 显存请把下游换成 VAEDecodeTiled，tile_size 设 384~512。"
       ]
     }
   ],

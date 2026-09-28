@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -114,6 +114,8 @@ class RunningHubClient:
       * 只用 requests，避免引入 aiohttp 等重依赖，ComfyUI 环境几乎必然已有 requests。
       * 网络层异常自动重试；业务失败（如 805）立即抛出，不做重试——重试只会重复扣费。
       * 任何异常消息都经过 _mask 脱敏，杜绝 API Key 泄漏到 ComfyUI 前端。
+      * **响应解析必须宽容**：同一套接口在不同版本/不同节点类型下返回过
+        list、{"results": [...]}、带 status 字段等多种形态，这里全部兼容。
     """
 
     def __init__(
@@ -124,6 +126,7 @@ class RunningHubClient:
         max_retries: int = 3,
         retry_interval: float = 2.0,
         session: Optional[requests.Session] = None,
+        structure_ttl: float = 300.0,
     ) -> None:
         # 允许用户粘贴带空格/换行的 key，避免最常见的无效输入
         self.api_key = (api_key or "").strip()
@@ -133,6 +136,12 @@ class RunningHubClient:
         self.max_retries = max(max_retries, 1)
         self.retry_interval = retry_interval
         self._session = session or requests.Session()
+        # 工作流结构的进程内缓存：避免同一条工作流每次运行都多打一次接口。
+        # TTL 不宜过长，否则用户改完云端工作流后本地还在用旧结构。
+        self._structure_ttl = max(0.0, structure_ttl)
+        self._structure_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        # 最近一次原始响应体，供排错时原样展示给用户
+        self._last_body: Any = None
 
     # ---------------- 内部工具 ----------------
 
@@ -226,11 +235,18 @@ class RunningHubClient:
             )
         return str(task_id)
 
+    def last_raw_body(self) -> Any:
+        """最近一次接口返回的原始响应体，用于排错时原样展示。"""
+        return self._last_body
+
     def fetch_outputs(self, task_id: str) -> Dict[str, Any]:
         """查询一次任务结果。
 
         返回统一结构：{"state": "running|queued|success", "outputs": [...]}
         任务失败时抛 TaskFailedError。
+
+        注意：state == "success" 时 outputs **可能为空列表**——对象存储的
+        文件落地比状态更新慢几拍是正常现象，是否算失败由 wait_for_outputs 决定。
         """
         payload = {"apiKey": self.api_key, "taskId": task_id}
         url = f"{self.base_url}/task/openapi/outputs"
@@ -246,14 +262,12 @@ class RunningHubClient:
         )
         resp.raise_for_status()
         body = resp.json()
+        self._last_body = body
 
         code = body.get("code")
         data = body.get("data")
+        status = self._status_of(data, body)
 
-        if code == CODE_RUNNING:
-            return {"state": "running", "outputs": []}
-        if code == CODE_QUEUED:
-            return {"state": "queued", "outputs": []}
         if code == CODE_FAILED or (isinstance(data, dict) and "failedReason" in data):
             reason = (data or {}).get("failedReason") or {}
             raise TaskFailedError(
@@ -261,11 +275,62 @@ class RunningHubClient:
                 exception_message=self._mask(reason.get("exception_message", "")),
                 traceback=self._mask(reason.get("traceback", "")),
             )
-        if code == CODE_SUCCESS and isinstance(data, list):
+        if status in ("FAILED", "FAIL", "ERROR"):
+            raise TaskFailedError(
+                exception_message=self._mask(
+                    (data or {}).get("failedReason")
+                    or (data or {}).get("msg")
+                    or (data or {}).get("error")
+                    or "云端任务失败"
+                )
+            )
+        if code == CODE_RUNNING or status in ("RUNNING", "EXECUTING", "PROCESSING"):
+            return {"state": "running", "outputs": []}
+        if code == CODE_QUEUED or status in ("QUEUED", "PENDING", "WAITING"):
+            return {"state": "queued", "outputs": []}
+        if code == CODE_SUCCESS or status in ("SUCCESS", "SUCCEEDED", "COMPLETED", "FINISHED"):
+            return {"state": "success", "outputs": self._extract_outputs(data)}
+
+        # code 既不是 0 也不是已知状态码：只有当真的拿到了文件列表时才敢算成功。
+        # 这条兜底是为了兼容部分版本「code 缺位、只给 data」的响应。
+        if isinstance(data, list):
             return {"state": "success", "outputs": data}
 
         hint = _ERROR_HINTS.get(code, self._mask(body.get("msg", "")))
         raise RunningHubError(f"查询任务 {task_id} 失败 —— {hint}")
+
+    @staticmethod
+    def _status_of(data: Any, body: Dict[str, Any]) -> str:
+        """从 data 或 body 里取状态字符串，统一成大写。"""
+        for source in (data, body):
+            if isinstance(source, dict):
+                for key in ("status", "taskStatus", "state"):
+                    value = source.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip().upper()
+        return ""
+
+    @staticmethod
+    def _extract_outputs(data: Any) -> List[Dict[str, Any]]:
+        """从多种响应形态里抽出输出文件列表。
+
+        实测/用户反馈中见过的形态：
+          * data 直接是 list
+          * data = {"results": [...]}      <- 文档里提到的 results
+          * data = {"outputs": [...]}
+          * data = {"fileList": [...]}
+          * data 本身就是单个文件 dict
+        """
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            for key in ("results", "outputs", "files", "fileList", "list", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [x for x in value if isinstance(x, dict)]
+            if "fileUrl" in data or "url" in data:
+                return [data]
+        return []
 
     def wait_for_outputs(
         self,
@@ -273,21 +338,39 @@ class RunningHubClient:
         poll_interval: float = 5.0,
         timeout: float = 600.0,
         on_progress: Optional[Callable[[str, float], None]] = None,
+        empty_retries: int = 1,
+        empty_retry_delay: float = 2.0,
     ) -> List[Dict[str, Any]]:
-        """轮询直到成功，返回输出文件列表。"""
+        """轮询直到成功，返回输出文件列表。
+
+        empty_retries：状态已成功但文件列表为空时的补查次数。
+        对象存储的文件落地普遍比状态更新慢 1~3 秒，这是真实存在的竞态，
+        直接抛错会让用户白白损失一次已付费的任务。
+        """
         started = time.time()
         last_state = ""
+        empty_seen = 0
 
         while True:
             result = self.fetch_outputs(task_id)
             state = result["state"]
+            outputs = result["outputs"]
 
             if state == "success":
-                return result["outputs"]
+                if outputs:
+                    return outputs
+                if empty_seen < empty_retries:
+                    empty_seen += 1
+                    if on_progress is not None:
+                        on_progress("等待文件同步", time.time() - started)
+                    time.sleep(empty_retry_delay)
+                    continue
+                # 补查后依然为空，才认为是真的没有输出
+                return []
 
             if state != last_state and on_progress is not None:
                 last_state = state
-                label = "云端执行中" if state == "running" else "云端排队中"
+                label = "云端生成中" if state == "running" else "云端排队中"
                 on_progress(label, time.time() - started)
 
             elapsed = time.time() - started
@@ -296,35 +379,73 @@ class RunningHubClient:
 
             time.sleep(min(poll_interval, max(0.5, timeout - elapsed)))
 
-    def get_workflow_params(self, workflow_id: str) -> Dict[str, Any]:
-        """拉取云端工作流的可修改参数清单（getJsonApiFormat）。
+    def get_workflow_structure(self, workflow_id: str) -> Dict[str, Dict[str, Any]]:
+        """拉取云端工作流结构，归一化成 {nodeId: {class_type, inputs}}。
 
-        返回原始 JSON dict。失败时返回 {} 而不抛错——这是辅助功能，不应阻断主流程。
+        这是极简版「零配置」依赖的能力：拿到结构才能自动定位提示词文本节点
+        与采样器 seed 字段。拿不到时返回空 dict，由调用方决定如何降级。
         """
+        key = str(workflow_id).strip()
+        if not key:
+            return {}
+
+        hit = self._structure_cache.get(key)
+        if hit is not None:
+            stamp, value = hit
+            if self._structure_ttl <= 0 or (time.time() - stamp) < self._structure_ttl:
+                return value
+
+        raw = self._fetch_workflow_raw(key)
+        from . import workflow as workflow_mod
+
+        structure = workflow_mod.normalize(raw)
+        if structure:
+            self._structure_cache[key] = (time.time(), structure)
+        return structure
+
+    def _fetch_workflow_raw(self, workflow_id: str) -> Any:
+        """实际发起请求。该接口在不同版本下 GET/POST 都能通，逐个试。"""
         url = f"{self.base_url}/api/openapi/getJsonApiFormat"
-        for params in ({"workflowId": workflow_id}, {"workflowId": workflow_id, "apiKey": self.api_key}):
-            for getter in ("params", "json"):
-                try:
-                    if getter == "params":
-                        resp = self._session.get(url, params=params, timeout=self.timeout)
-                    else:
-                        resp = self._session.post(
-                            url,
-                            data=json.dumps(params).encode("utf-8"),
-                            headers={"Content-Type": "application/json"},
-                            timeout=self.timeout,
-                        )
-                    resp.raise_for_status()
-                    body = resp.json()
-                    if isinstance(body, dict):
-                        inner = body.get("data", body)
-                        # 部分版本把工作流 JSON 放在 data.prompt 的字符串里
-                        if isinstance(inner, dict) and "prompt" in inner:
-                            return inner["prompt"]
+        attempts = (
+            ("post", {"apiKey": self.api_key, "workflowId": workflow_id}),
+            ("get", {"workflowId": workflow_id, "apiKey": self.api_key}),
+            ("get", {"workflowId": workflow_id}),
+        )
+        for method, params in attempts:
+            try:
+                if method == "post":
+                    resp = self._session.post(
+                        url,
+                        data=json.dumps(params, ensure_ascii=False).encode("utf-8"),
+                        headers={
+                            "Content-Type": "application/json",
+                            "Host": requests.utils.urlparse(self.base_url).netloc,
+                        },
+                        timeout=self.timeout,
+                    )
+                else:
+                    resp = self._session.get(url, params=params, timeout=self.timeout)
+                resp.raise_for_status()
+                body = resp.json()
+            except Exception:
+                continue
+
+            if not isinstance(body, dict):
+                continue
+            self._last_body = body
+            data = body.get("data", body)
+            if isinstance(data, dict):
+                # 部分版本把工作流塞在 data.prompt 的字符串里
+                for inner_key in ("prompt", "workflow", "json", "api"):
+                    inner = data.get(inner_key)
+                    if isinstance(inner, (dict, str)):
                         return inner
-                except Exception:
-                    continue
-        return {}
+            return data
+        return None
+
+    def get_workflow_params(self, workflow_id: str) -> Dict[str, Any]:
+        """旧接口名，保留兼容。返回归一化后的结构。"""
+        return self.get_workflow_structure(workflow_id)  # type: ignore[return-value]
 
 
 __all__ = [

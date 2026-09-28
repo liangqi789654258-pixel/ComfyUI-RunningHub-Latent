@@ -69,31 +69,48 @@ for name, cls in mappings.items():
              f"{len(cls.RETURN_TYPES)} 个输出, 执行方法={cls.FUNCTION}")
 
 print("\n=== 3. 示例工作流与节点定义一致性 ===")
-from rhplugin.nodes import RunningHubLatentGenerator as Gen
+from rhplugin.nodes import RunningHubLatentGenerator as GenPro
+from rhplugin.nodes import RunningHubLatentGeneratorSimple as GenSimple
 
 # 所有 required 输入都会成为 widget（本插件没有复杂类型输入）
-expected_widgets = list(Gen.INPUT_TYPES()["required"].keys())
-n_returns = len(Gen.RETURN_TYPES)
+MAIN_NODES = {
+    "RunningHubLatentGenerator": GenPro,
+    "RunningHubLatentGeneratorSimple": GenSimple,
+}
 
-for fname in sorted(os.listdir(EXAMPLES)):
-    if not fname.endswith(".json"):
-        continue
+if not os.path.isdir(EXAMPLES):
+    fail(f"缺少 examples 目录：{EXAMPLES}")
+    example_files = []
+else:
+    example_files = sorted(f for f in os.listdir(EXAMPLES) if f.endswith(".json"))
+
+if not example_files:
+    fail("examples 目录下没有任何工作流")
+
+for fname in example_files:
     path = os.path.join(EXAMPLES, fname)
     with open(path, "r", encoding="utf-8") as fh:
         wf = json.load(fh)
 
     nodes_by_id = {n["id"]: n for n in wf["nodes"]}
-    gen_nodes = [n for n in wf["nodes"] if n["type"] == "RunningHubLatentGenerator"]
+    gen_nodes = [n for n in wf["nodes"] if n["type"] in MAIN_NODES]
     if len(gen_nodes) != 1:
-        fail(f"{fname}: 应恰好包含 1 个主节点，实际 {len(gen_nodes)}")
+        fail(f"{fname}: 应恰好包含 1 个主节点（极简版或专业版），实际 {len(gen_nodes)}")
         continue
     g = gen_nodes[0]
 
+    cls = MAIN_NODES[g["type"]]
+    expected_widgets = list(cls.INPUT_TYPES()["required"].keys())
+    n_returns = len(cls.RETURN_TYPES)
+
     got = len(g.get("widgets_values", []))
     if got != len(expected_widgets):
-        fail(f"{fname}: 主节点 widget 数量 {got} != 定义 {len(expected_widgets)}")
+        fail(
+            f"{fname}: {g['type']} widget 数量 {got} != 定义 {len(expected_widgets)}"
+            f"（定义顺序：{expected_widgets}）"
+        )
     else:
-        good(f"{fname}: 主节点 widget 数量一致（{got}）")
+        good(f"{fname}: {g['type']} widget 数量一致（{got}）")
 
     outs = g.get("outputs", [])
     if len(outs) != n_returns:
@@ -119,7 +136,8 @@ for fname in sorted(os.listdir(EXAMPLES)):
 
 print("\n=== 4. 必需交付文件齐备 ===")
 required = ["README.md", "LICENSE", "CHANGELOG.md", "requirements.txt",
-            "config.example.json", ".gitignore", "__init__.py", "nodes.py"]
+            "config.example.json", "config.example.ini", ".gitignore",
+            "__init__.py", "nodes.py", "web/rh_warning.js"]
 for f in required:
     p = os.path.join(PLUGIN, f)
     if os.path.isfile(p) and os.path.getsize(p) > 0:
@@ -145,6 +163,45 @@ for dirpath, dirnames, filenames in os.walk(PLUGIN):
                 found = True
 if not found:
     good("未发现硬编码密钥")
+
+print("\n=== 6. 示例覆盖度与前后端契约 ===")
+covered = {n["type"] for f in example_files
+           for n in json.load(open(os.path.join(EXAMPLES, f), encoding="utf-8"))["nodes"]
+           if n["type"] in MAIN_NODES}
+for node_type in MAIN_NODES:
+    if node_type in covered:
+        good(f"示例已覆盖 {node_type}")
+    else:
+        fail(f"没有任何示例工作流使用 {node_type}")
+
+# Python 发警告用的事件名，必须与 web/rh_warning.js 监听的名字完全一致，
+# 否则「节点变黄」会静默失效——这正是本次改造要消灭的那类问题。
+from rhplugin import nodes as nodes_mod
+
+event_name = getattr(nodes_mod, "_WARNING_EVENT", "")
+js_path = os.path.join(PLUGIN, "web", "rh_warning.js")
+if event_name and os.path.isfile(js_path):
+    js = open(js_path, encoding="utf-8").read()
+    if event_name in js:
+        good(f"前后端警告事件名一致（{event_name}）")
+    else:
+        fail(f"web/rh_warning.js 未监听事件名 {event_name}")
+else:
+    fail("缺少警告事件名或 web/rh_warning.js")
+
+# WEB_DIRECTORY 必须声明，否则前端脚本根本不会被注入
+if getattr(plugin, "WEB_DIRECTORY", None) == "web":
+    good("WEB_DIRECTORY 已声明")
+else:
+    fail("WEB_DIRECTORY 未声明，前端扩展不会被加载")
+
+# 配置文件必须被 .gitignore 排除
+gi = open(os.path.join(PLUGIN, ".gitignore"), encoding="utf-8").read()
+for entry in ("config.json", "config.ini"):
+    if entry in gi:
+        good(f".gitignore 已排除 {entry}")
+    else:
+        fail(f".gitignore 未排除 {entry}，密钥有泄漏风险")
 
 print("\n" + "=" * 60)
 print("全部检查通过" if ok else "存在失败项，需修复")

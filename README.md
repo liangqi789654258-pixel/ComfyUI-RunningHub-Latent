@@ -32,7 +32,7 @@ cd ComfyUI-RunningHub-Latent
 pip install -r requirements.txt
 ```
 
-重启 ComfyUI，在节点列表里搜索 **RunningHub** 分类即可看到 4 个节点。
+重启 ComfyUI，在节点列表里搜索 **RunningHub** 分类即可看到 5 个节点。
 
 > 三个依赖（requests / safetensors / numpy）在标准 ComfyUI 环境中都已存在，
 > 这一步通常只会提示「已满足」。
@@ -54,10 +54,28 @@ pip install -r requirements.txt
 > ⚠️ 做不到这一步，插件会明确报错告诉你「没有产出 latent 文件」，并把云端实际输出的
 > 文件列给你看。这是最常见的配置错误。
 
-### 第二步：拿到可注入参数的 nodeId
+### 第二步：在云端文本节点里写占位符（极简版必需）
 
-在工作流里拖一个 **RH 工作流参数探查** 节点，填上 api_key 和 workflow_id，运行。
-它会把云端所有可修改的节点和字段打印出来：
+打开云端工作流的**正面提示词**文本框，把内容改成：
+
+```
+{positive}
+```
+
+负面提示词框同理改成 `{negative}`。可以带前后缀，例如
+`masterpiece, {positive}, best quality` —— 前后缀会被保留。
+
+> 这一步是极简版能「零配置」的前提。忘了写的话节点**会明确警告**（画布上变黄
+> + report 里写明），不会静默失效。
+
+### 第三步：本地跑通
+
+- **极简版**：拖 `RH 云端采样 · 极简版`，只填 `workflow_id`，把 latent 接到
+  本地 `VAEDecode` / `VAEDecodeTiled` → `SaveImage`。完事。
+- **专业版**：还要填 `node_overrides`（见下节）。
+
+不知道 nodeId 就拖一个 **RH 工作流参数探查** 节点执行一下，它会把云端所有
+可修改节点列出来：
 
 ```
 ● nodeId=3  [KSampler]
@@ -65,11 +83,49 @@ pip install -r requirements.txt
     fieldName = steps      当前值 = 20
 ● nodeId=6  [CLIPTextEncode]
     fieldName = text       当前值 = 1 girl
+
+── 自动定位检查 ──
+提示词占位符：{positive} 命中 1 处，{negative} 命中 1 处
+  → 极简版可以自动注入提示词。
+随机种子：命中 1 个可注入字段（nodeId=3.seed）
 ```
 
-### 第三步：配置本地节点
+它会直接告诉你这条工作流能不能被极简版自动注入。
 
-**RH 云端采样 · 输出 Latent** 的 `node_overrides` 填：
+### 不想每次都粘贴 API Key？
+
+把 `config.example.ini` 复制成 `config.ini` 并填写（旧的 `config.json` 继续兼容）：
+
+```ini
+[runninghub]
+api_key = 你的 RunningHub API Key
+default_workflow_id = 1980237776367083521
+base_url = https://www.runninghub.cn
+timeout = 600
+poll_interval = 5
+```
+
+优先级：**节点显式输入 > config.ini > config.json > 内置默认值**。
+临时换 Key 试跑不会被配置绑架。两个配置文件都已被 `.gitignore` 排除。
+
+## 节点一览
+
+| 节点 | 用途 | 适合谁 |
+|------|------|--------|
+| **RH 云端采样 · 极简版** | 零配置。自动定位提示词与种子，其余全部用云端默认值 | 新手 / 云端已调好只想换提示词 |
+| **RH 云端采样 · 专业版** | 额外支持 `node_overrides` 完整参数映射 | 需要本地调 step / cfg / 尺寸 / 二采 denoise |
+| **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
+| **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
+| **RH 工作流参数探查** | 拉取云端工作流结构与可改参数，并判断能否自动定位 | 第一次配某条工作流时 |
+
+### 两个版本怎么选
+
+**极简版**会在提交前先拉一次云端工作流结构，扫描**所有字符串字段**里的
+`{positive}` / `{negative}` 并替换，同时自动找采样器的 `seed` 字段注入种子。
+因为它不认节点类型、只认占位符文本，所以单文本节点、双 CLIPTextEncode、
+甚至提示词藏在第三方节点里都能命中。
+
+**专业版**则把控制权完全交给你：
 
 ```json
 [
@@ -81,48 +137,31 @@ pip install -r requirements.txt
 ]
 ```
 
-`{positive}` / `{negative}` / `{seed}` 会绑定节点上对应的输入框和 seed 滑块。
-之后把 `latent` 输出接到本地 **VAEDecode**，再接 SaveImage，点击运行即可。
-
-### 不想每次都粘贴 API Key？
-
-把 `config.example.json` 复制成 `config.json` 并填写。这个文件已被 `.gitignore`
-忽略，**绝不会**被提交到仓库：
-
-```json
-{
-  "api_key": "你的 RunningHub API Key",
-  "base_url": "https://www.runninghub.cn",
-  "default_workflow_id": "1980237776367083521",
-  "timeout": 600,
-  "poll_interval": 5
-}
-```
-
-优先级：**节点显式输入 > config.json > 内置默认值**。临时换 Key 试跑不会被配置绑架。
-
-## 节点一览
-
-| 节点 | 用途 |
-|------|------|
-| **RH 云端采样 · 输出 Latent** | 主节点。提交 → 轮询 → 下载 → 输出标准 LATENT |
-| **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） |
-| **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） |
-| **RH 工作流参数探查** | 拉取云端工作流的可修改参数清单，免去人工抄 nodeId |
-
-### 主节点参数
+### 共用参数
 
 | 参数 | 说明 |
 |------|------|
-| `api_key` | 留空则读 config.json |
+| `api_key` | 留空则读 config.ini / config.json |
 | `workflow_id` | RunningHub 工作流 ID |
-| `node_overrides` | 参数注入 JSON，支持 `{positive}` `{negative}` `{seed}` 占位符 |
-| `positive` / `negative` | 配合占位符使用，也可留空只用云端的默认值 |
+| `positive` / `negative` | 正面/负面提示词。极简版自动注入；专业版需配合占位符 |
 | `seed` | `-1` 表示每次随机；其余值在 ≤0xFFFFFFFFFFFFFFFF 范围内 |
 | `timeout` | 最长等待秒数，60–3600。视频工作流建议调大 |
 | `poll_interval` | 轮询间隔（秒），默认 5 |
 | `use_cache` | 同参数命中本地缓存时跳过云端调用，**不扣费** |
-| `use_high_performance` | 切到 48GB 高性能实例（`instanceType: plus`），消耗更多额度 |
+| `use_high_performance` | 切到高性能实例（`instanceType: plus`），消耗更多额度 |
+
+**极简版独有**
+
+| 参数 | 说明 |
+|------|------|
+| `on_missing_placeholder` | 云端没找到占位符时：警告继续（默认）/ 报错中断 |
+
+**专业版独有**
+
+| 参数 | 说明 |
+|------|------|
+| `node_overrides` | 参数映射 JSON，支持 `{positive}` `{negative}` `{seed}` 占位符 |
+| `validate_mapping` | 开启后会把 nodeId / fieldName 拿去和云端结构核对，写错就明确提示 |
 
 ### 参数注入的三种写法
 
@@ -155,6 +194,19 @@ pip install -r requirements.txt
 
 ## 常见问题排查
 
+**提示词填了但没生效（最重要的一条）**
+
+分三种情况，全部都会被明确告知，不会静默失败：
+
+1. **极简版，云端没写占位符** → 节点变黄 + report 提示
+   「未找到 {positive} 占位符」。去云端文本节点把内容改成 `{positive}` 即可。
+2. **专业版，映射里没写 `{positive}`** → report 提示
+   「参数映射里没有出现 {positive} 占位符」，并给出正确的 JSON 片段。
+3. **nodeId 换工作流后失效** → 打开 `validate_mapping`，会直接告诉你
+   「nodeId『6』在云端工作流里不存在」。
+
+不确定就先跑一次 **RH 工作流参数探查**，它会打印占位符命中数和种子命中字段。
+
 **`云端任务已完成，但没有产出 latent 文件`**
 云端工作流末端没接「保存Latent」，或该节点被短路了。按上面的第一步检查。
 报错里会列出云端实际输出了哪些文件，照着排查即可。
@@ -186,17 +238,21 @@ VAE 解码（SDXL 的 latent 用 SD1.5 的 VAE 解码必崩）。参考云端工
 
 ```
 ComfyUI-RunningHub-Latent/
-├── __init__.py            节点注册
-├── nodes.py               4 个节点的 UI 定义与业务流程
+├── __init__.py            节点注册 + WEB_DIRECTORY
+├── nodes.py               5 个节点的 UI 定义与业务流程
 ├── core/
 │   ├── client.py          RunningHub OpenAPI 封装（重试 / 错误映射 / 脱敏）
-│   ├── latent.py           latent 解析，对齐原生 LoadLatent
-│   ├── cache.py            按参数哈希的本地 latent 缓存
-│   └── settings.py         config.json 读取
+│   ├── latent.py          latent 解析，对齐原生 LoadLatent
+│   ├── workflow.py        工作流结构解析 + 提示词全局替换 + 映射校验
+│   ├── cache.py           按参数哈希的本地 latent 缓存
+│   └── settings.py        config.ini / config.json 读取
+├── web/
+│   └── rh_warning.js      前端扩展：警告时给节点上色、拉高提示词输入框
 ├── tests/
-│   ├── test_core.py       核心逻辑冒烟测试（49 项，不需要 API Key）
+│   ├── test_core.py       核心逻辑冒烟测试（104 项，不需要 API Key）
 │   └── test_package.py    交付物一致性检查（节点定义 vs 示例工作流）
-├── examples/              示例工作流
+├── examples/              4 份示例工作流（极简 / 专业 / 视频 / 二采）
+├── config.example.ini
 └── config.example.json
 ```
 
@@ -206,12 +262,13 @@ ComfyUI-RunningHub-Latent/
 
 ```bash
 cd ComfyUI-RunningHub-Latent
-python tests/test_core.py      # 核心逻辑 49 项断言
+python tests/test_core.py      # 核心逻辑 104 项断言
 python tests/test_package.py   # 节点定义与示例工作流是否一致
 ```
 
 `test_core.py` 用真实的 safetensors 文件验证 latent 解析的新旧格式与缩放行为，
-并用 mock session 走完「排队 → 运行 → 成功 / 失败」的完整状态机。
+用 mock session 走完「排队 → 运行 → 成功 / 失败 / 空结果补查」的完整状态机，
+并覆盖提示词替换、种子定位、映射校验、config.ini 解析等全部新增逻辑。
 
 ## 设计说明
 
