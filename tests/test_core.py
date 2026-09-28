@@ -513,17 +513,36 @@ with open(tmp_ini, "w", encoding="utf-8") as fh:
 parsed2 = settings_mod._read_ini(tmp_ini)
 check("空值保留为空串（交由 resolve 兜底）", parsed2.get("api_key") == "")
 
-print("\n=== 25. 极简版节点定义完整性 ===")
+print("\n=== 25. 极简版节点定义完整性（真·零配置契约） ===")
 from rhplugin.nodes import RunningHubLatentGeneratorSimple as Simple
 
 it = Simple.INPUT_TYPES()
 req = it["required"]
-for field in ("api_key", "workflow_id", "positive", "negative", "seed"):
-    check(f"极简版含字段 {field}", field in req)
-check("极简版不含 node_overrides（零配置）", "node_overrides" not in req)
+check("极简版含字段 api_key", "api_key" in req)
+check("极简版含字段 workflow_id", "workflow_id" in req)
+check(
+    "极简版只有这两个输入框（多一个都算违背零配置定位）",
+    set(req.keys()) == {"api_key", "workflow_id"},
+    f"实际字段：{sorted(req.keys())}",
+)
+check("极简版不含 node_overrides", "node_overrides" not in req)
 check("极简版声明了 hidden unique_id（用于前端上色）",
       it.get("hidden", {}).get("unique_id") == "UNIQUE_ID")
 check("极简版显示名为中文", getattr(Simple, "TITLE", "").startswith("RH 云端采样"))
+check("极简版每次执行都强制重算（保证随机种子出新图）",
+      Simple.IS_CHANGED(api_key="", workflow_id="") != Simple.IS_CHANGED(api_key="", workflow_id=""))
+
+print("\n=== 26. 专业版提示词输入框只显示 positive / negative ===")
+from rhplugin.nodes import RunningHubLatentGenerator as Pro
+
+pit = Pro.INPUT_TYPES()["required"]
+check("专业版 positive 的可见文本就是 positive",
+      pit["positive"][1].get("placeholder") == "positive")
+check("专业版 negative 的可见文本就是 negative",
+      pit["negative"][1].get("placeholder") == "negative")
+check("专业版参数映射默认留空（新手不被示例 JSON 吓退）",
+      pit["node_overrides"][1].get("default") == "")
+check("专业版参数映射带悬停说明", "nodeId" in pit["node_overrides"][1].get("tooltip", ""))
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)

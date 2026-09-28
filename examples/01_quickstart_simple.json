@@ -11,7 +11,7 @@
       ],
       "size": [
         460,
-        460
+        220
       ],
       "flags": {},
       "order": 0,
@@ -44,17 +44,9 @@
       },
       "widgets_values": [
         "",
-        "",
-        "masterpiece, best quality, 1girl, upper body",
-        "lowres, bad anatomy, watermark",
-        0,
-        600,
-        5.0,
-        true,
-        false,
-        "警告（沿用云端默认提示词）"
+        ""
       ],
-      "title": "RH 云端采样 · 极简版（只填工作流ID）"
+      "title": "RH 云端采样 · 极简版（只填这两个框）"
     },
     {
       "id": 2,
@@ -181,7 +173,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "【极简版 · 三步跑通】\n1) 云端工作流：末端接「保存Latent」，删掉「保存图像」；\n   并在正面提示词框里写 {positive}，负面提示词框里写 {negative}。\n2) 本节点：只填 workflow_id（云端 URL 里的数字 ID）和 API Key；\n   API Key 也可以写进插件目录的 config.ini，这里就能留空。\n3) 执行，latent 回来后交给下面的 VAEDecodeTiled 本地解码。\n\n本节点会自动定位提示词与种子，不用填任何 nodeId。\n如果 report 里出现黄色警告，说明云端没找到占位符标记——按警告提示改云端即可。\n\n6G 显存请把下游换成 VAEDecodeTiled，tile_size 设 384~512。"
+        "【极简版 · 三步跑通】\n1) 云端工作流：末端接「保存Latent」，删掉「保存图像」。\n2) 本节点：只填 workflow_id（云端 URL 里的数字 ID）和 API Key；\n   API Key 也可以写进插件目录的 config.ini，这里就能留空。\n3) 执行，latent 回来后交给下面的 VAEDecodeTiled 本地解码。\n\n没有其他任何参数：提示词直接在云端工作流里改好；\n每次运行自动换随机种子，所以每次点执行都会出新图。\n想改步数/CFG/尺寸，请换用「专业版」节点。\n\n6G 显存请把下游换成 VAEDecodeTiled，tile_size 设 384~512。"
       ]
     }
   ],

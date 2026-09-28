@@ -4,12 +4,13 @@ ComfyUI 节点定义。
 ## 两个核心版本怎么选
 
 * **极简版**（RH 云端采样 · 极简版）
-  只填 API Key 和工作流 ID 就能出图。提示词、种子由本插件自动定位注入，
-  其余参数全部沿用云端工作流的默认值。适合新手和「云端已经调好、只想换提示词」的场景。
+  画布上只有 api_key 和 workflow_id 两个输入框，填完就能出图。
+  提示词完全沿用云端默认文案，种子每次执行自动随机；其余参数走 config.ini。
 
 * **专业版**（RH 云端采样 · 专业版）
-  额外暴露 nodeInfoList 参数映射，可以精确改写云端任意节点的任意字段。
-  适合需要本地调 step / cfg / 尺寸等参数的场景。
+  在极简版同一套自动注入之外，额外暴露 nodeInfoList 参数映射，
+  可以精确改写云端任意节点的任意字段（步数 / CFG / 尺寸等）。
+  手工映射与自动注入冲突时，以手工映射为准。
 
 ## 为什么「自动定位」能成立
 
@@ -51,9 +52,6 @@ _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 # 前端自定义事件名，web/rh_warning.js 监听它来做节点变黄
 _WARNING_EVENT = "runninghub-latent-warning"
-
-_MISSING_WARN = "警告（沿用云端默认提示词）"
-_MISSING_ERROR = "报错（中断执行）"
 
 
 class RHUserError(RuntimeError):
@@ -528,54 +526,39 @@ def _auto_injections(
     positive: str,
     negative: str,
     seed: int,
-    warnings: List[str],
-) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-    """极简版的自动定位：提示词 + 种子。
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, int], List[Tuple[str, str]]]:
+    """极简版/专业版共用的自动定位：提示词占位符全局替换 + 采样器种子注入。
 
-    返回 (注入列表, 工作流结构)。结构拿不到时返回空注入 + 空结构，
-    由调用方决定是否降级为报错。
+    纯函数，不产生警告——警告怎么报（报几条、什么措辞）由调用方决定，
+    因为两个节点对「没找到占位符」的容忍度不同。
+
+    返回 (注入列表, 工作流结构, 占位符命中统计, 种子注入目标)。
+    结构拿不到时返回空注入 + 空结构 + 零统计。
     """
     structure = client.get_workflow_structure(workflow_id)
     if not structure:
-        warnings.append(
-            "没能读到云端工作流结构，自动注入已跳过。"
-            "请确认工作流 ID 正确且已保存（草稿状态无法被调用）；"
-            "若持续失败可改用「专业版」手动填 nodeId。"
-        )
-        return ([], {})
+        return ([], {}, {"positive": 0, "negative": 0}, [])
 
     injections: List[Dict[str, Any]] = []
 
     prompt_injections, stats = wf_mod.build_prompt_injections(structure, positive, negative)
     injections.extend(prompt_injections)
 
-    for token, label in (("positive", "正面提示词"), ("negative", "负面提示词")):
-        supplied = bool((positive if token == "positive" else negative).strip())
-        if supplied and stats[token] == 0:
-            warnings.append(
-                f"{label}已填写，但云端工作流里没有找到 {{{token}}} 占位符，"
-                "本次提示词未生效，将沿用云端默认提示词。"
-                "请到云端文本节点的文本框里写上 {" + token + "} 这个标记。"
-            )
-
     seed_targets = wf_mod.find_seed_targets(structure)
-    if seed_targets:
-        for node_id, field in seed_targets:
-            injections.append(
-                {"nodeId": node_id, "fieldName": field, "fieldValue": int(seed)}
-            )
-        if len(seed_targets) > 1:
-            warnings.append(
-                f"云端检测到 {len(seed_targets)} 个采样器，"
-                "已统一注入同一个随机种子。"
-            )
-    else:
-        warnings.append(
-            "云端工作流里没找到可注入的随机种子字段，种子未生效。"
-            "如需固定种子，请改用「专业版」手动指定 nodeId。"
+    for node_id, field in seed_targets:
+        injections.append(
+            {"nodeId": node_id, "fieldName": field, "fieldValue": int(seed)}
         )
 
-    return (injections, structure)
+    return (injections, structure, stats, seed_targets)
+
+
+def _warn_missing_structure(warnings: List[str]) -> None:
+    warnings.append(
+        "没能读到云端工作流结构，自动注入已跳过（提示词/种子将沿用云端默认值）。"
+        "请确认工作流 ID 正确且已保存（草稿状态无法被调用）；"
+        "若持续失败可改用「专业版」手动填 nodeId。"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -584,10 +567,18 @@ def _auto_injections(
 
 
 class RunningHubLatentGeneratorSimple:
-    """零配置的云端采样：只填密钥和工作流 ID，其余全部沿用云端默认值。
+    """真正的零配置节点：画布上只有 api_key 和 workflow_id 两个输入框。
 
-    提示词与种子由插件自动定位注入，因此云端工作流的文本框里必须写上
-    {positive} / {negative} 标记——没写会明确警告，不会静默失效。
+    设计原则（用户原话：「什么都不用调，填入 api_key 和 workflow_id
+    直接就能接 latent 解码出图」）：
+
+      * 提示词：完全沿用云端工作流的默认文案（本地没有提示词输入框）；
+      * 种子：每次执行自动生成一个新的随机种子并注入云端采样器，
+        保证每次点运行都能出新图，而不是拿到同一张旧图；
+      * timeout / poll_interval / use_cache 等参数不做成 widget，
+        全部走 config.ini 的全局配置，想调的高级用户去配置文件里改。
+
+    红线依然成立：种子没能注入时在 report 里明确警告，不静默。
     """
 
     @classmethod
@@ -608,42 +599,10 @@ class RunningHubLatentGeneratorSimple:
                     {
                         "multiline": False,
                         "default": "",
-                        "placeholder": "RunningHub 工作流 ID（留空读取配置文件）",
-                        "tooltip": "从云端工作流页面 URL 里取：runninghub.cn/workflow/<ID>",
+                        "placeholder": "RunningHub 工作流 ID",
+                        "tooltip": "从云端工作流页面 URL 里取：runninghub.cn/workflow/<ID>。\n"
+                                   "留空则读取配置文件里的 default_workflow_id。",
                     },
-                ),
-                "positive": (
-                    "STRING",
-                    {
-                        "multiline": True,
-                        "default": "",
-                        "placeholder": "正面提示词 —— 会替换云端工作流里的 {positive} 标记",
-                        "tooltip": (
-                            "需要云端工作流的文本节点里写有 {positive} 标记才会生效。\n"
-                            "留空表示不修改云端提示词，沿用云端默认文案。"
-                        ),
-                    },
-                ),
-                "negative": (
-                    "STRING",
-                    {
-                        "multiline": True,
-                        "default": "",
-                        "placeholder": "负面提示词 —— 会替换云端工作流里的 {negative} 标记",
-                        "tooltip": (
-                            "需要云端工作流的文本节点里写有 {negative} 标记才会生效。\n"
-                            "留空表示不修改云端提示词，沿用云端默认文案。"
-                        ),
-                    },
-                ),
-                "seed": ("INT", {"default": 0, "min": -1, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
-                "timeout": ("INT", {"default": 600, "min": 60, "max": 3600, "step": 10}),
-                "poll_interval": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 60.0, "step": 0.5}),
-                "use_cache": ("BOOLEAN", {"default": True}),
-                "use_high_performance": ("BOOLEAN", {"default": False}),
-                "on_missing_placeholder": (
-                    [_MISSING_WARN, _MISSING_ERROR],
-                    {"default": _MISSING_WARN},
                 ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -654,13 +613,16 @@ class RunningHubLatentGeneratorSimple:
     FUNCTION = "execute"
     CATEGORY = CATEGORY
     TITLE = "RH 云端采样 · 极简版"
+    DESCRIPTION = (
+        "只填 API Key 和工作流 ID，其余全部沿用云端默认值。\n"
+        "每次运行自动换随机种子；提示词请直接在云端工作流里改好。"
+    )
 
     @classmethod
     def IS_CHANGED(cls, **kwargs) -> float:
-        # seed < 0 表示「每次抽新种子」，必须强制重算，否则会得到重复画面
-        if int(kwargs.get("seed", 0) or 0) < 0:
-            return float("nan")
-        return float(hash(cache_mod.canonical_dumps(kwargs)) & 0xFFFFFFFF)
+        # 本节点没有任何本地参数：每次执行都应换一个随机种子出新图，
+        # 必须强制重算，否则 ComfyUI 会因为「输入没变」直接返回上次的 latent
+        return float("nan")
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs) -> bool:
@@ -670,63 +632,40 @@ class RunningHubLatentGeneratorSimple:
         self,
         api_key: str,
         workflow_id: str,
-        positive: str,
-        negative: str,
-        seed: int,
-        timeout: int,
-        poll_interval: float,
-        use_cache: bool,
-        use_high_performance: bool,
-        on_missing_placeholder: str = _MISSING_WARN,
         unique_id: Any = None,
     ) -> Tuple[Dict[str, torch.Tensor], str, str]:
         api_key = _resolve_api_key(api_key)
         workflow_id = _resolve_workflow_id(workflow_id)
         client = _make_client(api_key)
 
-        effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF) if seed < 0 else int(seed)
+        # 无 widget 的参数全部走配置文件，给高级用户留调节口
+        timeout = float(settings_mod.get("timeout", 600.0))
+        poll_interval = float(settings_mod.get("poll_interval", 5.0))
+        use_cache = str(settings_mod.get("use_cache", True)).strip().lower() not in (
+            "false", "0", "no", "off",
+        )
+        use_high_performance = str(
+            settings_mod.get("use_high_performance", False)
+        ).strip().lower() in ("true", "1", "yes", "on")
+
+        effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF)
         warnings: List[str] = []
 
-        injections, _structure = _auto_injections(
-            client, workflow_id, positive, negative, effective_seed, warnings
+        injections, _structure, _stats, seed_targets = _auto_injections(
+            client, workflow_id, "", "", effective_seed
         )
-
-        # 提示词没落地的处理：默认只警告，用户也可以选择直接中断
-        fatal = [
-            w for w in warnings if "占位符" in w or "随机种子" in w
-        ]
-        if fatal and on_missing_placeholder == _MISSING_ERROR:
-            raise RHUserError(
-                "已按你的设置中断执行（提示词/种子未能注入）：\n"
-                + "\n".join(f"  ⚠️ {w}" for w in fatal)
+        if not _structure:
+            _warn_missing_structure(warnings)
+        elif not seed_targets:
+            warnings.append(
+                "云端工作流里没找到可注入的随机种子字段，本次沿用云端默认种子"
+                "（可能重复出同一张图）。如需固定/指定种子，请改用「专业版」。"
+            )
+        elif len(seed_targets) > 1:
+            warnings.append(
+                f"云端检测到 {len(seed_targets)} 个采样器，已统一注入同一个随机种子。"
             )
 
-        return self._finish(
-            client,
-            workflow_id,
-            injections,
-            effective_seed,
-            float(timeout),
-            float(poll_interval),
-            use_cache,
-            use_high_performance,
-            warnings,
-            unique_id,
-        )
-
-    @staticmethod
-    def _finish(
-        client,
-        workflow_id,
-        injections,
-        effective_seed,
-        timeout,
-        poll_interval,
-        use_cache,
-        use_high_performance,
-        warnings,
-        unique_id,
-    ):
         result, task_id, lines = _run_sampling(
             client,
             workflow_id,
@@ -780,14 +719,21 @@ class RunningHubLatentGenerator:
                     "STRING",
                     {
                         "multiline": True,
-                        "default": "[]",
-                        "placeholder": '[{"nodeId": "3", "fieldName": "seed", "fieldValue": "{seed}"}]',
+                        "default": "",
+                        "placeholder": "advanced：参数映射 JSON（可选，留空即可。悬停查看格式）",
                         "tooltip": (
-                            "云端节点参数映射（JSON，可选）\n"
-                            "格式：[{\"nodeId\": \"节点ID\", \"fieldName\": \"字段名\", "
-                            "\"fieldValue\": \"值\"}]\n"
-                            "不填则完全使用云端默认值。可用 {seed} / {positive} / {negative} 占位符。\n"
-                            "不知道 nodeId 就先用「RH 工作流参数探查」节点拉清单。"
+                            "【可选】云端节点参数映射，留空 = 完全使用云端默认值。\n"
+                            "\n"
+                            "留空时本节点仍会自动注入提示词与种子（与极简版同一套逻辑）。\n"
+                            "只有想改步数 / CFG / 尺寸等云端参数时才需要填。\n"
+                            "\n"
+                            "格式（一行一个参数，整个是 JSON 数组）：\n"
+                            '[{"nodeId": "3", "fieldName": "steps", "fieldValue": 30}]\n'
+                            "\n"
+                            "  * nodeId / fieldName：先用「RH 工作流参数探查」节点查出来；\n"
+                            "  * fieldValue：直接写值；文本里可写 {seed} {positive} {negative}\n"
+                            "    占位符，会绑定到下方对应输入框；\n"
+                            "  * 与自动注入冲突时，以这里填的为准。"
                         ),
                     },
                 ),
@@ -796,10 +742,11 @@ class RunningHubLatentGenerator:
                     {
                         "multiline": True,
                         "default": "",
-                        "placeholder": "正面提示词 —— 替换云端工作流里的 {positive} 标记",
+                        "placeholder": "positive",
                         "tooltip": (
-                            "只在参数映射里写了 {positive} 占位符时才会生效；\n"
-                            "云端工作流未配置该标记则不生效（report 中会给出警告）。"
+                            "正面提示词。自动替换云端工作流文本里的 {positive} 标记；\n"
+                            "也可以在上方参数映射里用 {positive} 占位符精确指定注入位置。\n"
+                            "留空 = 沿用云端默认文案。"
                         ),
                     },
                 ),
@@ -808,10 +755,11 @@ class RunningHubLatentGenerator:
                     {
                         "multiline": True,
                         "default": "",
-                        "placeholder": "负面提示词 —— 替换云端工作流里的 {negative} 标记",
+                        "placeholder": "negative",
                         "tooltip": (
-                            "只在参数映射里写了 {negative} 占位符时才会生效；\n"
-                            "云端工作流未配置该标记则不生效（report 中会给出警告）。"
+                            "负面提示词。自动替换云端工作流文本里的 {negative} 标记；\n"
+                            "也可以在上方参数映射里用 {negative} 占位符精确指定注入位置。\n"
+                            "留空 = 沿用云端默认文案。"
                         ),
                     },
                 ),
@@ -862,29 +810,54 @@ class RunningHubLatentGenerator:
 
         effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF) if seed < 0 else int(seed)
         overrides = _normalize_overrides(node_overrides)
-        node_info_list = _apply_placeholders(
+        resolved_overrides = _apply_placeholders(
             overrides, {"seed": effective_seed, "positive": positive, "negative": negative}
         )
+        overrides_json = json.dumps(resolved_overrides, ensure_ascii=False)
 
         warnings: List[str] = []
 
-        # 占位符是否被真正用上：填了提示词却没有任何一项引用它 = 静默失效
-        joined = json.dumps(node_info_list, ensure_ascii=False)
+        # 第一步：自动注入（与极简版同一套全局替换逻辑）
+        injections, structure, stats, seed_targets = _auto_injections(
+            client, workflow_id, positive, negative, effective_seed
+        )
+        if not structure:
+            _warn_missing_structure(warnings)
+
+        # 第二步：手工映射叠加在自动注入之上，同字段以手工映射为准
+        node_info_list = _merge_injections(injections, resolved_overrides)
+
+        # 提示词红线：填了提示词，但自动替换没命中、手工映射里也没引用 → 明确警告
         for token, label in (("positive", "正面提示词"), ("negative", "负面提示词")):
             supplied = bool((positive if token == "positive" else negative).strip())
-            if supplied and "{" + token + "}" not in joined:
+            handled_manually = "{" + token + "}" in overrides_json
+            if supplied and stats.get(token, 0) == 0 and not handled_manually:
                 warnings.append(
-                    f"{label}已填写，但参数映射里没有出现 {{{token}}} 占位符，"
-                    "本次提示词不会生效（仍用云端默认文案）。"
-                    f"请在映射里加上：{{\"nodeId\": \"你的文本节点ID\", "
-                    f"\"fieldName\": \"text\", \"fieldValue\": \"{{{token}}}\"}}"
+                    f"{label}已填写，但云端工作流里没有找到 {{{token}}} 占位符，"
+                    "参数映射里也没有引用它，本次提示词未生效（仍用云端默认文案）。"
+                    "两种修法任选：\n"
+                    f"  1. 到云端文本节点的文本框里写上 {{{token}}} 这个标记（推荐）；\n"
+                    "  2. 在参数映射里加一条："
+                    f'{{"nodeId": "文本节点ID", "fieldName": "text", "fieldValue": "{{{token}}}"}}'
                 )
 
-        # 映射合法性校验：需要工作流结构，拿不到就跳过（不能拿不确定的信息吓唬用户）
-        if validate_mapping and node_info_list:
-            structure = client.get_workflow_structure(workflow_id)
-            if structure:
-                warnings.extend(wf_mod.validate_injections(structure, node_info_list))
+        # 种子：自动定位没找到、手工映射也没管 → 提示会重复出图
+        overrides_touch_seed = any(
+            str(o.get("fieldName", "")).lower() == "seed" for o in resolved_overrides
+        )
+        if structure and not seed_targets and not overrides_touch_seed:
+            warnings.append(
+                "云端工作流里没找到可注入的随机种子字段，本次沿用云端默认种子"
+                "（可能重复出同一张图）。如需指定种子，请在参数映射里手动加 seed 字段。"
+            )
+        if len(seed_targets) > 1:
+            warnings.append(
+                f"云端检测到 {len(seed_targets)} 个采样器，已统一注入同一个种子。"
+            )
+
+        # 映射合法性校验：结构已经在自动注入时拉过一次，直接复用，不再多打一次接口
+        if validate_mapping and resolved_overrides and structure:
+            warnings.extend(wf_mod.validate_injections(structure, node_info_list))
 
         result, task_id, lines = _run_sampling(
             client,

@@ -54,7 +54,7 @@ pip install -r requirements.txt
 > ⚠️ 做不到这一步，插件会明确报错告诉你「没有产出 latent 文件」，并把云端实际输出的
 > 文件列给你看。这是最常见的配置错误。
 
-### 第二步：在云端文本节点里写占位符（极简版必需）
+### 第二步：在云端文本节点里写占位符（要在本地改提示词才需要）
 
 打开云端工作流的**正面提示词**文本框，把内容改成：
 
@@ -65,14 +65,17 @@ pip install -r requirements.txt
 负面提示词框同理改成 `{negative}`。可以带前后缀，例如
 `masterpiece, {positive}, best quality` —— 前后缀会被保留。
 
-> 这一步是极简版能「零配置」的前提。忘了写的话节点**会明确警告**（画布上变黄
-> + report 里写明），不会静默失效。
+> 这一步是「在本地改提示词」的前提。忘了写的话节点**会明确警告**（画布上变黄
+> + report 里写明），不会静默失效。云端不写占位符也完全可以用——
+> 只是本地输入框填了提示词也不会生效，会沿用云端默认文案。
 
 ### 第三步：本地跑通
 
-- **极简版**：拖 `RH 云端采样 · 极简版`，只填 `workflow_id`，把 latent 接到
-  本地 `VAEDecode` / `VAEDecodeTiled` → `SaveImage`。完事。
-- **专业版**：还要填 `node_overrides`（见下节）。
+- **极简版**：拖 `RH 云端采样 · 极简版`，只有 `api_key` 和 `workflow_id`
+  两个输入框，填完把 latent 接到本地 `VAEDecode` / `VAEDecodeTiled` →
+  `SaveImage`。完事。提示词直接在云端工作流里改好；每次运行自动换随机种子。
+- **专业版**：同样开箱即用（自动注入提示词与种子）。只有想本地调
+  步数 / CFG / 尺寸等云端参数时才需要填 `node_overrides`（见下节）。
 
 不知道 nodeId 就拖一个 **RH 工作流参数探查** 节点执行一下，它会把云端所有
 可修改节点列出来：
@@ -112,26 +115,27 @@ poll_interval = 5
 
 | 节点 | 用途 | 适合谁 |
 |------|------|--------|
-| **RH 云端采样 · 极简版** | 零配置。自动定位提示词与种子，其余全部用云端默认值 | 新手 / 云端已调好只想换提示词 |
-| **RH 云端采样 · 专业版** | 额外支持 `node_overrides` 完整参数映射 | 需要本地调 step / cfg / 尺寸 / 二采 denoise |
+| **RH 云端采样 · 极简版** | **只有 2 个输入框**（api_key、workflow_id），填完即用；种子每次自动随机 | 新手 / 云端调好直接出图 |
+| **RH 云端采样 · 专业版** | 自动注入提示词与种子 + `node_overrides` 完整参数映射 | 需要本地调 step / cfg / 尺寸 / 二采 denoise |
 | **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
 | **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
 | **RH 工作流参数探查** | 拉取云端工作流结构与可改参数，并判断能否自动定位 | 第一次配某条工作流时 |
 
 ### 两个版本怎么选
 
-**极简版**会在提交前先拉一次云端工作流结构，扫描**所有字符串字段**里的
-`{positive}` / `{negative}` 并替换，同时自动找采样器的 `seed` 字段注入种子。
+两个版本**共用同一套自动注入**：提交前先拉一次云端工作流结构，扫描**所有字符串字段**
+里的 `{positive}` / `{negative}` 并替换，同时自动找采样器的 `seed` 字段注入种子。
 因为它不认节点类型、只认占位符文本，所以单文本节点、双 CLIPTextEncode、
 甚至提示词藏在第三方节点里都能命中。
 
-**专业版**则把控制权完全交给你：
+- **极简版**：把自动注入之外的一切都藏起来。没有提示词输入框（沿用云端文案）、
+  没有种子滑块（每次自动随机）、没有 timeout（走 config.ini）。
+  想要固定种子或本地改提示词，换专业版。
+- **专业版**：自动注入照常生效，`positive` / `negative` 输入框可直接改提示词；
+  再叠加 `node_overrides` 手工映射，**映射与自动注入冲突时以映射为准**：
 
 ```json
 [
-  {"nodeId": "6", "fieldName": "text",     "fieldValue": "{positive}"},
-  {"nodeId": "7", "fieldName": "text",     "fieldValue": "{negative}"},
-  {"nodeId": "3", "fieldName": "seed",     "fieldValue": "{seed}"},
   {"nodeId": "3", "fieldName": "steps",    "fieldValue": 20},
   {"nodeId": "3", "fieldName": "cfg",      "fieldValue": 7.0}
 ]
@@ -143,25 +147,22 @@ poll_interval = 5
 |------|------|
 | `api_key` | 留空则读 config.ini / config.json |
 | `workflow_id` | RunningHub 工作流 ID |
-| `positive` / `negative` | 正面/负面提示词。极简版自动注入；专业版需配合占位符 |
-| `seed` | `-1` 表示每次随机；其余值在 ≤0xFFFFFFFFFFFFFFFF 范围内 |
-| `timeout` | 最长等待秒数，60–3600。视频工作流建议调大 |
-| `poll_interval` | 轮询间隔（秒），默认 5 |
-| `use_cache` | 同参数命中本地缓存时跳过云端调用，**不扣费** |
-| `use_high_performance` | 切到高性能实例（`instanceType: plus`），消耗更多额度 |
 
-**极简版独有**
-
-| 参数 | 说明 |
-|------|------|
-| `on_missing_placeholder` | 云端没找到占位符时：警告继续（默认）/ 报错中断 |
+**极简版**：没有其他任何输入框。timeout / poll_interval / use_cache /
+use_high_performance 全部走 config.ini（见下），不占画布。
 
 **专业版独有**
 
 | 参数 | 说明 |
 |------|------|
-| `node_overrides` | 参数映射 JSON，支持 `{positive}` `{negative}` `{seed}` 占位符 |
-| `validate_mapping` | 开启后会把 nodeId / fieldName 拿去和云端结构核对，写错就明确提示 |
+| `positive` / `negative` | 正面/负面提示词，自动替换云端占位符 |
+| `seed` | 每次可固定；配合「生成后控制」实现固定或随机 |
+| `node_overrides` | 参数映射 JSON（可选，默认留空）。支持 `{positive}` `{negative}` `{seed}` 占位符 |
+| `timeout` | 最长等待秒数。视频工作流建议调大 |
+| `poll_interval` | 轮询间隔（秒），默认 5 |
+| `use_cache` | 同参数命中本地缓存时跳过云端调用，**不扣费** |
+| `use_high_performance` | 切到高性能实例（`instanceType: plus`），消耗更多额度 |
+| `validate_mapping` | 校验映射的 nodeId / fieldName 是否真实存在，写错在 report 提示 |
 
 ### 参数注入的三种写法
 
@@ -196,14 +197,14 @@ poll_interval = 5
 
 **提示词填了但没生效（最重要的一条）**
 
-分三种情况，全部都会被明确告知，不会静默失败：
+所有情况都会被明确告知（节点变黄 + report 写明），不会静默失败：
 
-1. **极简版，云端没写占位符** → 节点变黄 + report 提示
-   「未找到 {positive} 占位符」。去云端文本节点把内容改成 `{positive}` 即可。
-2. **专业版，映射里没写 `{positive}`** → report 提示
-   「参数映射里没有出现 {positive} 占位符」，并给出正确的 JSON 片段。
-3. **nodeId 换工作流后失效** → 打开 `validate_mapping`，会直接告诉你
+1. **云端没写占位符，映射里也没引用** → report 提示
+   「没有找到 {positive} 占位符」。两种修法：去云端文本节点把内容改成
+   `{positive}`（推荐）；或在 `node_overrides` 映射里用 `{positive}` 指定注入位置。
+2. **nodeId 换工作流后失效** → 打开 `validate_mapping`，会直接告诉你
    「nodeId『6』在云端工作流里不存在」。
+3. **极简版没找到种子字段** → report 提示沿用云端默认种子（可能重复出图）。
 
 不确定就先跑一次 **RH 工作流参数探查**，它会打印占位符命中数和种子命中字段。
 

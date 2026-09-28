@@ -2,6 +2,30 @@
 
 本项目所有值得记录的变更都会写在这里，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [1.2.0] - 2026-09-29
+
+按用户实测反馈做的易用性重构。主线是「极简版做到真·零配置」和「专业版开箱即用」。
+
+### 变更
+
+- **极简版只剩 2 个输入框**（api_key、workflow_id）：
+  - 移除了 positive / negative / seed / timeout / poll_interval / use_cache /
+    use_high_performance / on_missing_placeholder 全部 widget；
+  - 提示词完全沿用云端默认文案；种子每次执行自动随机（`IS_CHANGED` 强制重算）；
+  - timeout / poll_interval / use_cache / use_high_performance 改为从 config.ini 读取；
+  - 移除 `on_missing_placeholder` 选项，行为统一为「警告继续 + 节点变黄」。
+- **专业版开箱即用**：接入与极简版同一套自动注入（占位符全局替换 + 种子），
+  提示词不再需要手写映射；`node_overrides` 与自动注入冲突时以映射为准。
+- **专业版输入框文案**：提示词框可见文本只显示 `positive` / `negative`；
+  参数映射框默认留空，格式说明全部移入悬停提示（tooltip），不再用示例 JSON 当默认值。
+- 示例工作流同步重做：极简版示例只有 2 个 widget 值；专业版示例默认映射留空；
+  二采示例的映射只保留 denoise 一项（这才是映射的典型用途）。
+
+### 兼容性说明
+
+- 极简版输入结构变了：旧版画布里已摆好的极简版节点需要重新添加。
+- 专业版注册名、输入键名与 widget 顺序均未变，已保存的工作流不受影响。
+
 ## [1.1.0] - 2026-09-28
 
 按改造需求文档完成的一轮打磨。主线是「消灭静默失效」和「降低上手门槛」。

@@ -45,7 +45,7 @@
       "widgets_values": [
         "",
         "",
-        "[\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{positive}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{negative}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"seed\",\n    \"fieldValue\": \"{seed}\"\n  }\n]",
+        "",
         "a cinematic shot, camera slowly moves forward",
         "blurry, watermark, flicker",
         0,

@@ -45,7 +45,7 @@
       "widgets_values": [
         "",
         "",
-        "[\n  {\n    \"nodeId\": \"这里填云端节点ID\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{positive}\"\n  },\n  {\n    \"nodeId\": \"这里填云端节点ID\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{negative}\"\n  },\n  {\n    \"nodeId\": \"这里填云端节点ID\",\n    \"fieldName\": \"seed\",\n    \"fieldValue\": \"{seed}\"\n  },\n  {\n    \"nodeId\": \"这里填云端二采节点ID\",\n    \"fieldName\": \"denoise\",\n    \"fieldValue\": 0.45\n  }\n]",
+        "[\n  {\n    \"nodeId\": \"这里填云端二采采样器的nodeId\",\n    \"fieldName\": \"denoise\",\n    \"fieldValue\": 0.45\n  }\n]",
         "masterpiece, best quality, 1girl, detailed eyes",
         "lowres, bad anatomy, blurry",
         0,
@@ -182,7 +182,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "【二采高清修复】\n二采发生在云端，本地拿到的已经是高清 latent，所以本地这一段和单采完全一样。\n\n云端工作流要这样搭：\n  采样器A（出图）→ LatentUpscale / 放大节点 → 采样器B（denoise 0.4~0.6）\n  → 保存Latent\n\n本例的 overrides 额外演示了如何本地调二采的 denoise：\n把 nodeId 换成云端二采采样器的 ID 即可，不用每次去云端改。\n\n放大后 latent 尺寸变大，本地解码显存压力随之上升。\n6G 显存请务必用 VAEDecodeTiled 并把 tile_size 降到 384~512，\n实在不够就把 VAE 换到 CPU 跑（ComfyUI 启动时加 --cpu-vae）。"
+        "【二采高清修复】\n二采发生在云端，本地拿到的已经是高清 latent，所以本地这一段和单采完全一样。\n\n云端工作流要这样搭：\n  采样器A（出图）→ LatentUpscale / 放大节点 → 采样器B（denoise 0.4~0.6）\n  → 保存Latent\n\n本例演示了参数映射的典型用途：本地直接调云端二采的 denoise，\n把 nodeId 换成云端二采采样器的 ID 即可，不用每次去云端改。\n\n放大后 latent 尺寸变大，本地解码显存压力随之上升。\n6G 显存请务必用 VAEDecodeTiled 并把 tile_size 降到 384~512，\n实在不够就把 VAE 换到 CPU 跑（ComfyUI 启动时加 --cpu-vae）。"
       ]
     }
   ],
