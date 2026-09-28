@@ -144,6 +144,57 @@ def _node_sort_key(node_id: str) -> Tuple[int, str]:
         return (1, str(node_id))
 
 
+def _linked_prompt_targets(
+    structure: Dict[str, Dict[str, Any]]
+) -> Dict[str, List[Tuple[str, str]]]:
+    """跟随采样器的 positive / negative 连线，找到提示词编码节点的 text 字段。
+
+    这是占位符扫描的兜底路径：有些工作流的 getJsonApiFormat 返回里
+    看不到文本节点的 widget 值（比如文本节点没被注册成 API 参数），
+    占位符扫描永远是 0 命中。但只要结构里保留了采样器的连线关系，
+    就能确定性地找到「哪个节点的 text 是正提示、哪个是负提示」。
+
+    返回 {"positive": [(nodeId, fieldName)...], "negative": [...]}。
+    同一个 text 字段不允许同时归属正、负两个 token（正常工作流也不会）。
+    """
+    targets: Dict[str, List[Tuple[str, str]]] = {"positive": [], "negative": []}
+
+    for node_id, meta in sorted(structure.items(), key=lambda kv: _node_sort_key(kv[0])):
+        class_type = str(meta.get("class_type", "")).lower()
+        if "sampler" not in class_type:
+            continue
+        inputs = meta.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            continue
+        for token in ("positive", "negative"):
+            link = inputs.get(token)
+            # 连线引用形如 [源节点Id, 输出槽序号]
+            if not (isinstance(link, list) and len(link) >= 1):
+                continue
+            src_id = str(link[0])
+            src_meta = structure.get(src_id)
+            if not src_meta:
+                continue  # 连线源不在结构里（部分工作流返回会缺节点），兜底放弃
+            src_inputs = src_meta.get("inputs") or {}
+            if not isinstance(src_inputs, dict) or "text" not in src_inputs:
+                continue  # 连线源没有 text 字段，不是提示词编码节点
+            targets[token].append((src_id, "text"))
+
+    # 解决冲突：同一个 (nodeId, field) 只归一个 token，positive 优先认领
+    claimed: Dict[Tuple[str, str], str] = {}
+    for token in ("positive", "negative"):
+        unique: List[Tuple[str, str]] = []
+        for slot in targets[token]:
+            owner = claimed.get(slot)
+            if owner is not None and owner != token:
+                continue
+            if owner is None:
+                claimed[slot] = token
+            unique.append(slot)
+        targets[token] = unique
+    return targets
+
+
 def build_prompt_injections(
     structure: Dict[str, Dict[str, Any]], positive: str, negative: str
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
@@ -153,10 +204,17 @@ def build_prompt_injections(
 
     调用方必须检查命中次数：为 0 意味着云端工作流里根本没有占位符，
     用户填的提示词不会生效——这种情况必须显式警告，绝不能静默跳过。
+
+    两级查找：
+      1. 占位符扫描（主路径）：云端文本里写了 {positive}/{negative} 就替换；
+      2. 连线跟随（兜底）：占位符一个都没命中、但用户填了提示词时，
+         沿采样器的 positive/negative 连线找到编码节点，直接整体覆盖其 text。
+         兜底命中同样计入命中次数，调用方不会误报「未生效」。
     """
     injections: List[Dict[str, Any]] = []
     stats = {"positive": 0, "negative": 0}
     values = {"positive": positive or "", "negative": negative or ""}
+    supplied = {token: bool((values[token]).strip()) for token in values}
 
     for node_id, field, text in iter_string_fields(structure):
         new_text = text
@@ -169,6 +227,19 @@ def build_prompt_injections(
             injections.append(
                 {"nodeId": node_id, "fieldName": field, "fieldValue": new_text}
             )
+
+    # 兜底：占位符没命中但用户填了提示词 -> 沿连线找注入点
+    if any(supplied[t] and stats[t] == 0 for t in supplied):
+        targets = _linked_prompt_targets(structure)
+        for token in ("positive", "negative"):
+            if not (supplied[token] and stats[token] == 0):
+                continue
+            for node_id, field in targets[token]:
+                injections.append(
+                    {"nodeId": node_id, "fieldName": field, "fieldValue": values[token]}
+                )
+                stats[token] += 1
+
     return injections, stats
 
 

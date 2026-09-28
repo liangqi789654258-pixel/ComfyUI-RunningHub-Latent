@@ -827,18 +827,21 @@ class RunningHubLatentGenerator:
         # 第二步：手工映射叠加在自动注入之上，同字段以手工映射为准
         node_info_list = _merge_injections(injections, resolved_overrides)
 
-        # 提示词红线：填了提示词，但自动替换没命中、手工映射里也没引用 → 明确警告
+        # 提示词红线：填了提示词，但自动替换（含连线兜底）没命中、手工映射也没引用 → 明确警告
         for token, label in (("positive", "正面提示词"), ("negative", "负面提示词")):
             supplied = bool((positive if token == "positive" else negative).strip())
             handled_manually = "{" + token + "}" in overrides_json
             if supplied and stats.get(token, 0) == 0 and not handled_manually:
+                node_count = len(structure) if structure else 0
                 warnings.append(
-                    f"{label}已填写，但云端工作流里没有找到 {{{token}}} 占位符，"
-                    "参数映射里也没有引用它，本次提示词未生效（仍用云端默认文案）。"
-                    "两种修法任选：\n"
-                    f"  1. 到云端文本节点的文本框里写上 {{{token}}} 这个标记（推荐）；\n"
-                    "  2. 在参数映射里加一条："
-                    f'{{"nodeId": "文本节点ID", "fieldName": "text", "fieldValue": "{{{token}}}"}}'
+                    f"{label}已填写，但本次未能注入云端（占位符没扫到，"
+                    f"沿采样器连线兜底也没找到编码节点；"
+                    f"云端结构读到了 {node_count} 个节点）。"
+                    "最可靠的修法是在参数映射里直接指定文本节点：\n"
+                    f'  {{"nodeId": "文本节点ID", "fieldName": "text", '
+                    f'"fieldValue": "{{{token}}}"}}\n'
+                    "文本节点的 ID 可以在 RunningHub 网页编辑器里看到，"
+                    "或运行「RH 工作流参数探查」确认云端返回了哪些节点。"
                 )
 
         # 种子：自动定位没找到、手工映射也没管 → 提示会重复出图

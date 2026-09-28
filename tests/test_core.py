@@ -545,6 +545,51 @@ check("专业版参数映射默认留空（新手不被示例 JSON 吓退）",
 check("专业版参数映射带悬停说明", "nodeId" in pit["node_overrides"][1].get("tooltip", ""))
 
 # ---------------------------------------------------------------------------
+print("\n=== 27. 连线跟随兜底：结构里看不到占位符时也能注入 ===")
+
+# 用户真实场景：getJsonApiFormat 只返回采样器与连线，看不到文本节点的 widget 值
+struct_link = {
+    "272": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 512}},
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": "cloud default", "clip": ["266", 0]}},
+    "263": {"class_type": "CLIPTextEncode", "inputs": {"text": "cloud negative", "clip": ["266", 0]}},
+    "266": {"class_type": "CLIPTextEncode", "inputs": {"text": "lora trigger words"}},
+    "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["263", 0]}},
+    "161": {"class_type": "KSamplerAdvanced", "inputs": {"noise_seed": 2, "positive": ["270", 0], "negative": ["263", 0]}},
+}
+inj_l, stats_l = wf_mod.build_prompt_injections(struct_link, "1girl", "lowres")
+check("兜底：正向经连线命中", stats_l["positive"] >= 1, str(stats_l))
+check("兜底：负向经连线命中", stats_l["negative"] >= 1, str(stats_l))
+by_node_l = {(i["nodeId"], i["fieldName"]): i["fieldValue"] for i in inj_l}
+check("兜底：注入打到 270.text",
+      by_node_l.get(("270", "text")) == "1girl", str(by_node_l))
+check("兜底：注入打到 263.text",
+      by_node_l.get(("263", "text")) == "lowres", str(by_node_l))
+check("兜底：不会污染非提示词节点", ("266", "text") not in by_node_l)
+check("兜底：同一字段不重复注入（两个采样器共享同一编码节点）",
+      sum(1 for k in by_node_l if k == ("270", "text")) == 1)
+
+# 连线指向的节点不在结构里（部分返回缺节点）-> 兜底放弃，命中数保持 0
+struct_missing = {
+    "3": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["999", 0], "negative": ["998", 0]}},
+}
+inj_m, stats_m = wf_mod.build_prompt_injections(struct_missing, "a", "b")
+check("兜底：连线源缺失时安全放弃", stats_m["positive"] == 0 and stats_m["negative"] == 0 and inj_m == [])
+
+# 占位符已命中时，兜底不应画蛇添足
+inj_p, stats_p = wf_mod.build_prompt_injections(struct, "1girl", "bad")
+check("占位符主路径优先，不触发兜底",
+      all(i["nodeId"] in ("6", "7") for i in inj_p) and len(inj_p) == 2)
+
+# 正负连线指向同一个节点：不产生互相覆盖的双注入
+struct_same = {
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": "same node"}},
+    "3": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["270", 0]}},
+}
+inj_s, stats_s = wf_mod.build_prompt_injections(struct_same, "pos", "neg")
+check("正负同节点时 positive 优先认领", stats_s["positive"] == 1 and stats_s["negative"] == 0, str(stats_s))
+check("正负同节点时只注入一条", len(inj_s) == 1 and inj_s[0]["fieldValue"] == "pos")
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 60)
 print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")
 if FAILED:
