@@ -263,6 +263,17 @@ def _merge_injections(
     return [merged[k] for k in sorted(merged.keys())]
 
 
+def _preview(text: str, limit: int = 60) -> str:
+    """把提示词压成单行预览，方便在 report 里核对「实际提交的是什么」。
+
+    这个字段看着不起眼，却是排查「提示词没生效」最快的手段：一旦输入框被
+    转换成输入接口并接了上游节点，框里看到的文字就不再生效，只有这里显示的
+    才是真正送进云端的内容。
+    """
+    flat = " ".join(str(text or "").split())
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
 # ---------------------------------------------------------------------------
 # 输出识别
 # ---------------------------------------------------------------------------
@@ -832,15 +843,15 @@ class RunningHubLatentGenerator:
             supplied = bool((positive if token == "positive" else negative).strip())
             handled_manually = "{" + token + "}" in overrides_json
             if supplied and stats.get(token, 0) == 0 and not handled_manually:
+                reason = wf_mod.prompt_link_diagnosis(structure, token)
                 node_count = len(structure) if structure else 0
                 warnings.append(
-                    f"{label}已填写，但本次未能注入云端（占位符没扫到，"
-                    f"沿采样器连线兜底也没找到编码节点；"
-                    f"云端结构读到了 {node_count} 个节点）。"
+                    f"{label}已填写，但没能注入云端。定位结果：{reason}"
+                    f"（云端结构共读到 {node_count} 个节点）。\n"
                     "最可靠的修法是在参数映射里直接指定文本节点：\n"
                     f'  {{"nodeId": "文本节点ID", "fieldName": "text", '
                     f'"fieldValue": "{{{token}}}"}}\n'
-                    "文本节点的 ID 可以在 RunningHub 网页编辑器里看到，"
+                    "文本节点 ID 可在 RunningHub 网页编辑器里看到，"
                     "或运行「RH 工作流参数探查」确认云端返回了哪些节点。"
                 )
 
@@ -858,6 +869,21 @@ class RunningHubLatentGenerator:
                 f"云端检测到 {len(seed_targets)} 个采样器，已统一注入同一个种子。"
             )
 
+        # 空提示词 + 云端有占位符 = 会把云端提示词换成空内容，必须说出来
+        hits = wf_mod.placeholder_hits(structure) if structure else {"positive": 0, "negative": 0}
+        for token, label, value in (
+            ("positive", "正面提示词", positive),
+            ("negative", "负面提示词", negative),
+        ):
+            if not str(value or "").strip() and hits.get(token, 0) > 0:
+                warnings.append(
+                    f"{label}是空的，但云端工作流里有 {hits[token]} 处 {{{token}}} 标记，"
+                    "本次会把云端提示词替换为空内容（画面对不上却没有任何报错，就是这个原因）。\n"
+                    "如果你在提示词输入框前面接了文本处理节点：请确认上游节点确实输出了内容，"
+                    "并且接的是它的文本输出口而不是 help/说明类输出口；"
+                    "注意输入框一旦连上节点，框里手写的文字就不再生效，值完全由连线决定。"
+                )
+
         # 映射合法性校验：结构已经在自动注入时拉过一次，直接复用，不再多打一次接口
         if validate_mapping and resolved_overrides and structure:
             warnings.extend(wf_mod.validate_injections(structure, node_info_list))
@@ -874,6 +900,14 @@ class RunningHubLatentGenerator:
             warnings,
             unique_id,
         )
+        # 回显真正送进云端的提示词——排查「提示词不生效」最快的一眼定位点
+        previews: List[str] = []
+        if str(positive or "").strip():
+            previews.append(f"本次提交的正面提示词：{_preview(positive)}")
+        if str(negative or "").strip():
+            previews.append(f"本次提交的负面提示词：{_preview(negative)}")
+        if previews:
+            lines = lines[:1] + previews + lines[1:]
         return (result, task_id, "\n".join(lines))
 
 

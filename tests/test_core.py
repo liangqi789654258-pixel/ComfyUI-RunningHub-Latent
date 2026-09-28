@@ -37,6 +37,7 @@ from rhplugin.nodes import (
     _collect_latents,
     _merge_latents,
     _normalize_overrides,
+    _preview,
     RHUserError,
 )
 
@@ -588,6 +589,75 @@ struct_same = {
 inj_s, stats_s = wf_mod.build_prompt_injections(struct_same, "pos", "neg")
 check("正负同节点时 positive 优先认领", stats_s["positive"] == 1 and stats_s["negative"] == 0, str(stats_s))
 check("正负同节点时只注入一条", len(inj_s) == 1 and inj_s[0]["fieldValue"] == "pos")
+
+print("\n=== 28. 文本处理节点接在前面：沿上游连线回溯找落点 ===")
+
+# 用户场景：CLIPTextEncode 的 text 被上游「字符串拼接/通配符」节点接管，
+# 此时往编码节点注入 text 会被上游覆盖 —— 属于最坏的静默失效。
+struct_chain = {
+    "272": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 1152}},
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": ["300", 0], "clip": ["266", 0]}},
+    "263": {"class_type": "CLIPTextEncode", "inputs": {"text": ["301", 0], "clip": ["266", 0]}},
+    "300": {"class_type": "StringConcat", "inputs": {"text_a": "prefix, ", "text_b": "old prompt"}},
+    "301": {"class_type": "StringConcat", "inputs": {"text_a": "bad, ", "text_b": "old neg"}},
+    "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["263", 0]}},
+}
+inj_c, stats_c = wf_mod.build_prompt_injections(struct_chain, "1girl", "lowres")
+# 上游有两个字符串字段且都没占位符 -> 不敢猜，保持 0 命中以便如实报警
+check("上游多字段且无占位符时不猜（保持 0 命中）",
+      stats_c["positive"] == 0 and stats_c["negative"] == 0 and inj_c == [], str(stats_c))
+check("多字段场景能给出精确诊断",
+      "多个文本字段" in wf_mod.prompt_link_diagnosis(struct_chain, "positive"))
+
+# 上游只有一个字符串字段 -> 唯一确定，直接注入上游
+struct_one = {
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": ["300", 0]}},
+    "263": {"class_type": "CLIPTextEncode", "inputs": {"text": ["301", 0]}},
+    "300": {"class_type": "StringProcessor", "inputs": {"text": "old positive"}},
+    "301": {"class_type": "StringProcessor", "inputs": {"text": "old negative"}},
+    "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["263", 0]}},
+}
+inj_o, stats_o = wf_mod.build_prompt_injections(struct_one, "1girl", "lowres")
+by_node_o = {(i["nodeId"], i["fieldName"]): i["fieldValue"] for i in inj_o}
+check("上游单字段时回溯注入成功", stats_o["positive"] == 1 and stats_o["negative"] == 1, str(stats_o))
+check("注入落到上游 300.text 而非被覆盖的 270",
+      by_node_o.get(("300", "text")) == "1girl", str(by_node_o))
+check("注入落到上游 301.text", by_node_o.get(("301", "text")) == "lowres")
+check("不再往被上游接管的节点注入（避免静默失效）", ("270", "text") not in by_node_o)
+
+# 上游链更长（两级）也能挖到源头
+struct_deep = {
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": ["300", 0]}},
+    "300": {"class_type": "TextJoin", "inputs": {"value": ["310", 0]}},
+    "310": {"class_type": "PrimitiveString", "inputs": {"value": "old"}},
+    "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["263", 0]}},
+}
+inj_d, stats_d = wf_mod.build_prompt_injections(struct_deep, "deep pos", "")
+check("两级上游链能挖到最源头", stats_d["positive"] == 1, str(stats_d))
+check("源头注入值正确",
+      any(i["nodeId"] == "310" and i["fieldValue"] == "deep pos" for i in inj_d))
+
+# 占位符写在上游节点里 -> 主路径直接命中（用户最该用的写法）
+struct_up = {
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": ["300", 0]}},
+    "300": {"class_type": "StringConcat", "inputs": {"text_a": "masterpiece, {positive}", "text_b": "x"}},
+    "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0]}},
+}
+inj_u, stats_u = wf_mod.build_prompt_injections(struct_up, "1girl", "")
+check("占位符写在上游时主路径命中", stats_u["positive"] == 1, str(stats_u))
+check("上游占位符被替换且保留前缀",
+      any(i["nodeId"] == "300" and i["fieldValue"] == "masterpiece, 1girl" for i in inj_u))
+
+print("\n=== 29. 空提示词撞上云端占位符：必须报警而非静默 ===")
+struct_ph = {
+    "270": {"class_type": "CLIPTextEncode", "inputs": {"text": "{positive}"}},
+    "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0]}},
+}
+hits = wf_mod.placeholder_hits(struct_ph)
+check("能统计出云端占位符数量", hits["positive"] == 1 and hits["negative"] == 0, str(hits))
+check("空工作流结构时统计为 0", wf_mod.placeholder_hits({})["positive"] == 0)
+check("_preview 压平空白并限长",
+      _preview("  a\n  b  " + "x" * 100).startswith("a b") and _preview("x" * 100).endswith("…"))
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)

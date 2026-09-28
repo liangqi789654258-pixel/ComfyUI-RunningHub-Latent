@@ -38,6 +38,12 @@ _TOKEN_PATTERNS = {
 _SEED_FIELDS = ("seed", "noise_seed", "rand_seed")
 _SAMPLER_HINTS = ("sampler",)
 
+# 沿上游回溯时，「文本类字段」的候选优先级（各插件包命名不统一）
+_TEXT_FIELD_ORDER = (
+    "text", "string", "value", "prompt", "str",
+    "text_a", "text_b", "text_g", "text_l", "wildcard",
+)
+
 
 def normalize(data: Any) -> Dict[str, Dict[str, Any]]:
     """把各种形态的工作流响应归一化成：
@@ -144,18 +150,105 @@ def _node_sort_key(node_id: str) -> Tuple[int, str]:
         return (1, str(node_id))
 
 
+def _upstream_text_source(
+    structure: Dict[str, Dict[str, Any]], node_id: str, field: str = "text"
+) -> Optional[Tuple[str, str]]:
+    """从 (nodeId, field) 沿连线向上游走，找到**真正能写入**的字符串字段。
+
+    为什么要往上游走：ComfyUI 里一个 widget 一旦被上游连线接管，它在工作流
+    JSON 里就从「字符串」变成「连线引用 [源节点, 0]」。此时往这个节点注入
+    text 是无效的——运行期值会被上游覆盖，而且不报错，属于最坏的静默失效。
+    典型场景就是用户在文本节点前面接了字符串拼接 / 通配符 / 提示词处理节点。
+
+    只返回**能唯一确定**的落点：
+      * 字段值本身是字符串 -> 就是它（最普通的情况）；
+      * 上游节点里有字段值含 {positive}/{negative} 占位符 -> 认这个；
+      * 上游节点只有一个字符串字段 -> 用这个；
+      * 上游有多个字符串字段且都没有占位符 -> 返回 None，交给调用方报错，
+        绝不替用户猜（猜错同样是静默失效，只是更隐蔽）。
+    """
+    seen = set()
+    cur_id, cur_field = str(node_id), field
+
+    for _ in range(8):  # 限深，防止环形连线死循环
+        key = (cur_id, cur_field)
+        if key in seen:
+            return None
+        seen.add(key)
+
+        meta = structure.get(cur_id)
+        if not meta:
+            return None
+        inputs = meta.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            return None
+        value = inputs.get(cur_field)
+
+        if isinstance(value, str):
+            return (cur_id, cur_field)
+
+        if isinstance(value, list) and len(value) >= 1:
+            src_id = str(value[0])
+            src_meta = structure.get(src_id)
+            if not src_meta:
+                return None  # 上游节点不在返回结构里，无从下手
+            src_inputs = src_meta.get("inputs") or {}
+            if not isinstance(src_inputs, dict):
+                return None
+
+            str_fields = [f for f, v in src_inputs.items() if isinstance(v, str)]
+            # 占位符最可靠：用户在哪个字段写了标记就往哪注入
+            for candidate in str_fields:
+                text = str(src_inputs[candidate])
+                if _TOKEN_PATTERNS["positive"].search(text) or _TOKEN_PATTERNS[
+                    "negative"
+                ].search(text):
+                    return (src_id, candidate)
+            if len(str_fields) == 1:
+                return (src_id, str_fields[0])
+            if not str_fields:
+                # 上游仍然是纯连线，继续往上溯：先沿用同名字段，
+                # 再按常见文本字段名挑一个（value / string / prompt ...），
+                # 最后退化为「任一连线字段」。
+                nxt: Optional[str] = None
+                if cur_field in src_inputs:
+                    nxt = cur_field
+                else:
+                    for name in _TEXT_FIELD_ORDER:
+                        if name in src_inputs:
+                            nxt = name
+                            break
+                if nxt is None:
+                    for name, item in src_inputs.items():
+                        if isinstance(item, list):
+                            nxt = name
+                            break
+                if nxt is None:
+                    return None
+                cur_id, cur_field = src_id, nxt
+                continue
+            return None  # 多个候选且无占位符，不敢猜
+
+        return None  # 字段既不是字符串也不是连线（缺字段等）
+
+    return None
+
+
 def _linked_prompt_targets(
     structure: Dict[str, Dict[str, Any]]
 ) -> Dict[str, List[Tuple[str, str]]]:
-    """跟随采样器的 positive / negative 连线，找到提示词编码节点的 text 字段。
+    """跟随采样器的 positive / negative 连线，找到提示词文本的**可写入落点**。
 
     这是占位符扫描的兜底路径：有些工作流的 getJsonApiFormat 返回里
     看不到文本节点的 widget 值（比如文本节点没被注册成 API 参数），
     占位符扫描永远是 0 命中。但只要结构里保留了采样器的连线关系，
-    就能确定性地找到「哪个节点的 text 是正提示、哪个是负提示」。
+    就能确定性地找到「哪个节点承载正提示、哪个承载负提示」。
+
+    落点会继续沿上游连线回溯（见 _upstream_text_source），因此
+    「文本节点前面接了字符串拼接 / 通配符等处理节点」也能正确注入。
 
     返回 {"positive": [(nodeId, fieldName)...], "negative": [...]}。
-    同一个 text 字段不允许同时归属正、负两个 token（正常工作流也不会）。
+    同一个 (nodeId, fieldName) 不允许同时归属正、负两个 token。
     """
     targets: Dict[str, List[Tuple[str, str]]] = {"positive": [], "negative": []}
 
@@ -178,7 +271,12 @@ def _linked_prompt_targets(
             src_inputs = src_meta.get("inputs") or {}
             if not isinstance(src_inputs, dict) or "text" not in src_inputs:
                 continue  # 连线源没有 text 字段，不是提示词编码节点
-            targets[token].append((src_id, "text"))
+
+            # 该节点的 text 可能被上游连线接管 -> 继续往上游找真正能写的地方
+            resolved = _upstream_text_source(structure, src_id, "text")
+            if resolved is None:
+                continue  # 无法确定落点：宁可报错，也不要打一发无效的注入
+            targets[token].append(resolved)
 
     # 解决冲突：同一个 (nodeId, field) 只归一个 token，positive 优先认领
     claimed: Dict[Tuple[str, str], str] = {}
@@ -195,6 +293,59 @@ def _linked_prompt_targets(
     return targets
 
 
+def prompt_link_diagnosis(structure: Dict[str, Dict[str, Any]], token: str) -> str:
+    """解释某个提示词 token 为什么找不到可注入的落点，返回中文原因。
+
+    只在「确实没能注入」时调用，用来生成精确警告——泛泛地说
+    「请检查云端配置」对用户没有帮助，必须落到具体节点上。
+    """
+    if not structure:
+        return "云端工作流结构读取失败（getJsonApiFormat 没有返回可用节点）"
+
+    for node_id, meta in sorted(structure.items(), key=lambda kv: _node_sort_key(kv[0])):
+        class_type = str(meta.get("class_type", "")).lower()
+        if "sampler" not in class_type:
+            continue
+        inputs = meta.get("inputs") or {}
+        link = inputs.get(token)
+        if not (isinstance(link, list) and len(link) >= 1):
+            continue
+
+        src_id = str(link[0])
+        src_meta = structure.get(src_id)
+        if src_meta is None:
+            return (
+                f"采样器 nodeId={node_id} 的 {token} 连线指向 nodeId={src_id}，"
+                "但该节点不在云端返回的结构里（该节点未注册为 API 参数时常见）"
+            )
+        src_inputs = src_meta.get("inputs") or {}
+        if "text" not in src_inputs:
+            return (
+                f"连线目标 nodeId={src_id} 没有 text 字段（class_type="
+                f"{src_meta.get('class_type', '?')}），无法作为提示词落点"
+            )
+        if isinstance(src_inputs.get("text"), list) and src_inputs["text"]:
+            upstream_id = str(src_inputs["text"][0])
+            upstream_inputs = (structure.get(upstream_id) or {}).get("inputs") or {}
+            str_fields = [f for f, v in upstream_inputs.items() if isinstance(v, str)]
+            if len(str_fields) > 1:
+                return (
+                    f"nodeId={src_id} 的提示词由上游 nodeId={upstream_id} 提供，"
+                    f"而上游有多个文本字段（{'、'.join(sorted(str_fields))}），"
+                    "无法判断该注入哪一个"
+                )
+            return (
+                f"nodeId={src_id} 的 text 由上游连线（nodeId={upstream_id}）接管，"
+                "本插件无法就地覆盖，且上游也找不到唯一的文本字段"
+            )
+        return f"云端结构里 nodeId={src_id} 的 text 不可写入"
+
+    return (
+        "云端返回的结构里没有采样器的 positive/negative 连线，"
+        "无法自动定位提示词落点"
+    )
+
+
 def build_prompt_injections(
     structure: Dict[str, Dict[str, Any]], positive: str, negative: str
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
@@ -207,9 +358,11 @@ def build_prompt_injections(
 
     两级查找：
       1. 占位符扫描（主路径）：云端文本里写了 {positive}/{negative} 就替换；
-      2. 连线跟随（兜底）：占位符一个都没命中、但用户填了提示词时，
-         沿采样器的 positive/negative 连线找到编码节点，直接整体覆盖其 text。
-         兜底命中同样计入命中次数，调用方不会误报「未生效」。
+      2. 连线跟随（兜底）：占位符没命中但用户填了提示词时，沿采样器的
+         positive/negative 连线找到编码节点，再继续向上游回溯到真正可写的
+         字符串字段后整体覆盖（能处理「文本节点前面接了字符串处理节点」）。
+         兜底命中同样计入命中次数，调用方不会误报「未生效」；
+         无法确定唯一落点时**不产生注入**，保持 0 命中以便如实警告。
     """
     injections: List[Dict[str, Any]] = []
     stats = {"positive": 0, "negative": 0}
@@ -241,6 +394,20 @@ def build_prompt_injections(
                 stats[token] += 1
 
     return injections, stats
+
+
+def placeholder_hits(structure: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    """统计云端工作流里 {positive}/{negative} 标记的出现次数（与是否注入无关）。
+
+    用来识别一个很容易被忽略的静默场景：云端写了占位符，但本地提示词是
+    空字符串（比如上游文本处理节点没输出内容、或输出口接错），此时云端
+    提示词会被替换成空内容，画面完全不对，却没有任何报错。
+    """
+    counts = {"positive": 0, "negative": 0}
+    for _node_id, _field, text in iter_string_fields(structure):
+        for token, pattern in _TOKEN_PATTERNS.items():
+            counts[token] += len(pattern.findall(text))
+    return counts
 
 
 def find_seed_targets(structure: Dict[str, Dict[str, Any]]) -> List[Tuple[str, str]]:
@@ -331,4 +498,6 @@ __all__ = [
     "validate_injections",
     "iter_string_fields",
     "describe",
+    "prompt_link_diagnosis",
+    "placeholder_hits",
 ]
