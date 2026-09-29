@@ -660,6 +660,71 @@ check("_preview 压平空白并限长",
       _preview("  a\n  b  " + "x" * 100).startswith("a b") and _preview("x" * 100).endswith("…"))
 
 # ---------------------------------------------------------------------------
+print("\n=== 30. 音视频复合 latent（MiniMax H3）===")
+
+from rhplugin.nodes import (
+    RunningHubAVLatentMerge,
+    RunningHubAVLatentSplit,
+    _describe_samples,
+)
+
+video = torch.ones(1, 24, 3, 4, 4) * 0.5
+audio = torch.ones(1, 32, 2, 10) * 0.25
+
+tmpdir = tempfile.mkdtemp()
+av_path = os.path.join(tmpdir, "MiniMaxH3_00001_.latent")
+latent_mod.save_av_latent(av_path, video, audio, metadata={"prompt": "test"})
+check("AV latent 文件已写出", os.path.exists(av_path))
+
+with open(av_path, "rb") as fh:
+    av_blob = fh.read()
+
+parsed = latent_mod.parse(av_blob, av_path)
+check("AV latent 被识别为复合 latent", latent_mod.is_nested(parsed["samples"]))
+parts = list(parsed["samples"].unbind())
+check("视频 latent 形状还原正确", tuple(parts[0].shape) == (1, 24, 3, 4, 4), str(tuple(parts[0].shape)))
+check("音频 latent 形状还原正确", tuple(parts[1].shape) == (1, 32, 2, 10), str(tuple(parts[1].shape)))
+check(
+    "AV latent 不做 0.18215 补偿（H3 scale_factor 就是 1.0）",
+    abs(float(parts[0].flatten()[0]) - 0.5) < 1e-6,
+    str(float(parts[0].flatten()[0])),
+)
+
+# 普通 latent 不能被误判成 AV（回归保护）
+plain_path = os.path.join(tmpdir, "plain.latent")
+safetensors.torch.save_file(
+    {"latent_tensor": torch.ones(1, 16, 4, 4), "latent_format_version_0": torch.tensor([])},
+    plain_path,
+)
+with open(plain_path, "rb") as fh:
+    plain_blob = fh.read()
+parsed_plain = latent_mod.parse(plain_blob, plain_path)
+check("普通 latent 仍走原路径（未被误判为复合）", not latent_mod.is_nested(parsed_plain["samples"]))
+check("普通 latent 形状保持正确", tuple(parsed_plain["samples"].shape) == (1, 16, 4, 4))
+
+check("识别 .h3latent 为 latent", _classify({"fileUrl": "https://x/a.h3latent"}) == "latent")
+check("识别 .avlatent 为 latent", _classify({"fileUrl": "https://x/a.avlatent"}) == "latent")
+check("带签名查询串的 .latent 仍识别", _classify({"fileUrl": "https://x/a.latent?token=1"}) == "latent")
+
+split_node = RunningHubAVLatentSplit()
+out_v, out_a = split_node.split(parsed)
+check("拆分节点输出视频 latent", tuple(out_v["samples"].shape) == (1, 24, 3, 4, 4))
+check("拆分节点输出音频 latent", tuple(out_a["samples"].shape) == (1, 32, 2, 10))
+try:
+    split_node.split({"samples": torch.zeros(1, 16, 4, 4)})
+    check("非复合 latent 拆分必须报错（杜绝静默失效）", False)
+except RHUserError:
+    check("非复合 latent 拆分给出可读报错", True)
+
+merge_node = RunningHubAVLatentMerge()
+merged = merge_node.merge(out_v, out_a)[0]
+check("合并节点还原复合 latent", latent_mod.is_nested(merged["samples"]))
+check("合并时音频为空则原样返回", not latent_mod.is_nested(merge_node.merge(out_v)[0]["samples"]))
+
+text = _describe_samples(parsed["samples"])
+check("复合 latent 的形状回显同时含视频与音频", "视频" in text and "音频" in text, text)
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 60)
 print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")
 if FAILED:

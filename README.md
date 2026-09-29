@@ -32,7 +32,7 @@ cd ComfyUI-RunningHub-Latent
 pip install -r requirements.txt
 ```
 
-重启 ComfyUI，在节点列表里搜索 **RunningHub** 分类即可看到 5 个节点。
+重启 ComfyUI，在节点列表里搜索 **RunningHub** 分类即可看到 8 个节点。
 
 > 三个依赖（requests / safetensors / numpy）在标准 ComfyUI 环境中都已存在，
 > 这一步通常只会提示「已满足」。
@@ -120,6 +120,9 @@ poll_interval = 5
 | **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
 | **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
 | **RH 工作流参数探查** | 拉取云端工作流结构与可改参数，并判断能否自动定位 | 第一次配某条工作流时 |
+| **RH AV Latent 保存** | 替代原生「保存Latent」，能存 MiniMax H3 的音视频复合 latent | 云端跑 H3 时必用 |
+| **RH AV Latent 拆分** | 把复合 latent 拆成视频 / 音频两条，分别解码 | H3 本地解码必用 |
+| **RH AV Latent 合并** | 把视频 + 音频 latent 组装回复合 latent | 二采 / latent 放大 |
 
 ### 两个版本怎么选
 
@@ -190,8 +193,47 @@ use_high_performance 全部走 config.ini（见下），不占画布。
 | 8–12 GB | 512–1024 | 64 | 平衡画质与显存 |
 | 16 GB+ | 不适用（用 VAEDecode） | — | 全速解码，无额外限制 |
 
-视频 latent（5 维）建议先把帧数控制在合理范围，再按帧分批解码：长视频一次性
-走完整 VAE 会在中间态产生巨大的 5D 张量，分块只能减轻空间维度，减轻不了帧维度。
+### 视频 latent（5 维）怎么用
+
+完全可行，而且**对中小显存是最划算的用法**：视频采样的显存开销全在云端，
+本地只承担 VAE 解码。链路和图片一模一样，只有三点不同：
+
+1. **必须加载视频 VAE**（如 `wan_2.1_vae.safetensors`）。
+   如果误用图片 VAE，ComfyUI **不会报错**——它在
+   `comfy/sd.py` 里对「2 维 VAE + 5 维输入」的处理是 `samples_in[:, :, 0]`，
+   也就是**静默只解第一帧**。你会以为在出视频，实际只得到一张图。
+2. **必须用 VAEDecodeTiled，并调小时间维度的分块**。
+   节点 advanced 区里的 `temporal_size` / `temporal_overlap` 只在视频 VAE 上生效，
+   控制「一次解多少帧」。这是 6GB 显存下最有效的旋钮：
+
+   | 显存 | tile_size | overlap | temporal_size | temporal_overlap |
+   |------|-----------|---------|---------------|------------------|
+   | 4–6 GB | 320–384 | 64 | 16–32 | 8 |
+   | 8–12 GB | 512 | 64 | 32–64 | 8 |
+   | 16 GB+ | 640+ | 64 | 64+（或直接用 VAEDecode） | 8 |
+
+   装不下就继续降 `temporal_size`，它比调 `tile_size` 见效快得多。
+3. **解码输出是帧序列 IMAGE**，接 VHS 的 `VHS_VideoCombine` 成片即可
+   （需要 ffmpeg；缺的话 `pip install imageio-ffmpeg`）。
+
+时序衔接：`temporal_overlap` 就是用来补偿分段解码的段边界的，给到 8 基本无感。
+
+> ⚠️ `temporal_size` 的单位是**像素帧**，不是 latent 帧。节点内部会先除以时间压缩比
+> （Wan = 4），所以填 `16` 表示一次解 4 个 latent 帧、输出 16 帧像素。
+> **默认值 64 在 6GB 显存上会 OOM**，务必手动调小。
+
+建议先 33–81 帧试跑，`timeout` 给到 1800 以上（视频采样远慢于图片，默认 600 秒不够）。
+完整示例见 `examples/03_video_latent.json`。
+
+**端到端视频出片（云端工作流怎么搭、参数速查、分步验证清单、故障速查表）** 见
+[`docs/video-guide.md`](docs/video-guide.md)。
+
+**MiniMax H3 这类「一次同时生成视频和音频」的模型** 见
+[`docs/h3-av-latent.md`](docs/h3-av-latent.md)。要点：H3 的 latent 不是单个张量，
+而是 `NestedTensor(视频 latent, 音频 latent)`，原生「保存Latent」存不了它
+（会报 `'NestedTensor' object has no attribute 'contiguous'`），需要改用
+**RH AV Latent 保存** 节点；拿回本地后必须先用 **RH AV Latent 拆分** 拆成两条再
+分别解码，否则音频会被静默丢弃。
 
 ## 常见问题排查
 
@@ -245,9 +287,16 @@ API Key 无效、过期，或该 Key 类型无权调用工作流 API。工作流
 几乎一定是 **VAE 不匹配**。云端用什么底模生成的 latent，本地就必须用对应家族的
 VAE 解码（SDXL 的 latent 用 SD1.5 的 VAE 解码必崩）。参考云端工作流里用的 VAE。
 
-**视频 latent 形状报错**
+**视频 latent 形状报错 / 只出了一张图**
 确认云端输出的是 5 维 `[B, C, F, H, W]`，且本地接的是**支持视频的 VAE**。
-原生 VAEDecode 对 5 维输入需要视频类 VAE（如 Wan 系列）。
+如果没报错但只出来一张图，就是加载了图片 VAE——ComfyUI 会静默只取第一帧，
+换成 `wan_2.1_vae` 这类视频 VAE 即可（详见上面的「视频 latent 怎么用」）。
+
+**云端报 `'NestedTensor' object has no attribute 'contiguous'`**
+这是 MiniMax H3 专用场景。H3 的 latent 是「视频 + 音频」的复合对象，原生
+「保存Latent」处理不了，换成 **RH AV Latent 保存** 节点即可。
+拿回本地后记得用 **RH AV Latent 拆分** 拆开再解码——不拆的话音频会被静默丢掉。
+完整说明见 [`docs/h3-av-latent.md`](docs/h3-av-latent.md)。
 
 **生成到一半卡住**
 主节点是阻塞式的，会占住队列直到完成或超时。`timeout` 给足（视频给到 3600），

@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import os
 from io import BytesIO
-from typing import Union
+from typing import Any, Optional, Tuple, Union
 
 import torch
 
@@ -59,9 +59,132 @@ _LEGACY_LATENT_SCALE = 1.0 / 0.18215
 
 _LATENT_KEYS = ("latent_tensor", "latents")
 
+# 音视频复合 latent（目前只有 MiniMax H3 在用）的常见键名组合。
+# 顺序即优先级：社区 JerryZRic 的 .h3latent 用 latent_0/latent_1。
+_AV_PAIR_KEYS = (
+    ("latent_0", "latent_1"),
+    ("h3_video", "h3_audio"),
+    ("video_latent", "audio_latent"),
+    ("video", "audio"),
+)
+
+# 出现任意一个即认为这是 AV 容器（用于兜底识别）
+_AV_MARKER_KEYS = ("h3_format_version", "tensor_count", "av_format_version")
+
 
 class LatentParseError(ValueError):
     """latent 文件无法解析。消息面向用户，使用中文。"""
+
+
+class _FallbackNestedTensor:
+    """comfy.nested_tensor 不可用时的最小替身。
+
+    ComfyUI 的下游节点（VAEDecode / VAEDecodeAudio）只用到 is_nested 属性和
+    unbind()，所以 duck typing 足够。真正跑在 ComfyUI 里时永远走真货，
+    这里只是让离线单测也能覆盖 AV 分支。
+    """
+
+    def __init__(self, tensors):
+        self.tensors = list(tensors)
+        self.is_nested = True
+
+    def unbind(self):
+        return self.tensors
+
+    def to(self, *args, **kwargs):
+        return _FallbackNestedTensor([t.to(*args, **kwargs) for t in self.tensors])
+
+    def cpu(self):
+        return self.to("cpu")
+
+    @property
+    def shape(self):
+        return self.tensors[0].shape
+
+    @property
+    def ndim(self):
+        return max(t.ndim for t in self.tensors)
+
+    @property
+    def device(self):
+        return self.tensors[0].device
+
+    @property
+    def dtype(self):
+        return self.tensors[0].dtype
+
+    def __repr__(self):
+        return f"NestedTensor({[tuple(t.shape) for t in self.tensors]})"
+
+
+def make_nested(video: torch.Tensor, audio: torch.Tensor):
+    """把 (视频 latent, 音频 latent) 包成 ComfyUI 的 NestedTensor。"""
+    try:  # pragma: no cover - ComfyUI 专有
+        from comfy.nested_tensor import NestedTensor
+
+        return NestedTensor((video, audio))
+    except Exception:
+        return _FallbackNestedTensor((video, audio))
+
+
+def is_nested(obj: Any) -> bool:
+    """判断一个对象是不是音视频复合 latent。"""
+    return bool(getattr(obj, "is_nested", False)) and hasattr(obj, "unbind")
+
+
+def _split_av_tensors(data: dict):
+    """从 safetensors 结果里识别出 (视频 latent, 音频 latent)。
+
+    命中返回 (video, audio)，否则返回 None。判据有二：
+      1. 存在成对的已知键名（latent_0/latent_1 等）；
+      2. 兜底：恰好两个 3~5 维张量且维度数不同 —— 5 维那个视为视频。
+    普通 SaveLatent 产物只有一个 latent_tensor（外加 0 维的版本标记张量），
+    不会被这条兜底误伤。
+    """
+    if not isinstance(data, dict) or not data:
+        return None
+
+    for vk, ak in _AV_PAIR_KEYS:
+        v, a = data.get(vk), data.get(ak)
+        if isinstance(v, torch.Tensor) and isinstance(a, torch.Tensor):
+            return v, a
+
+    if not any(k in data for k in _AV_MARKER_KEYS):
+        return None
+
+    usable = [
+        v for v in data.values()
+        if isinstance(v, torch.Tensor) and len(v.shape) in (3, 4, 5)
+    ]
+    if len(usable) != 2:
+        return None
+    videos = [t for t in usable if len(t.shape) == 5]
+    if len(videos) != 1:
+        return None
+    video = videos[0]
+    audio = [t for t in usable if t is not video][0]
+    return video, audio
+
+
+def parse_av(data: dict, source: str = ""):
+    """把 AV 容器还原成 {"samples": NestedTensor}。不是 AV 容器时返回 None。
+
+    ## 为什么这里一律不乘 1/0.18215
+
+    那条补偿只对「SDXL 时代存盘前除以过 0.18215」的老 latent 成立。
+    目前唯一会产生复合 latent 的 MiniMax H3，其 latent_format 的
+    scale_factor 就是 1.0（comfy/latent_formats.py MiniMaxH3Video），
+    存的是原始值。对 H3 误乘 5.49 倍会直接把画面毁成噪声。
+    """
+    pair = _split_av_tensors(data)
+    if pair is None:
+        return None
+    video, audio = pair
+    video = video.to(torch.float32)
+    audio = audio.to(torch.float32)
+    if len(video.shape) == 3:  # 缺 batch 轴
+        video = video.unsqueeze(0)
+    return {"samples": make_nested(video, audio)}
 
 
 def _pick_tensor(data: dict, source: str) -> torch.Tensor:
@@ -136,8 +259,8 @@ def looks_like_safetensors(blob: bytes) -> bool:
     return 8 <= header_size <= len(blob) and header_size <= 100_000_000
 
 
-def load_safetensors(source: Union[str, bytes]) -> torch.Tensor:
-    """加载 .latent / .safetensors。source 可为本地路径或内存字节。"""
+def _load_safetensors_dict(source: Union[str, bytes]) -> Tuple[dict, str]:
+    """读取 safetensors 文件，返回 (原始键值 dict, 来源标签)。"""
     if safetensors is None:
         raise LatentParseError(
             "缺少 safetensors 依赖，请在 ComfyUI 的 Python 环境中执行："
@@ -158,7 +281,19 @@ def load_safetensors(source: Union[str, bytes]) -> torch.Tensor:
             f"底层错误：{exc}。"
             f"若这是手动下载的文件，请确认下载完整（未下载到网页 HTML 或错误页）。"
         ) from exc
+    return data, label
+
+
+def load_safetensors(source: Union[str, bytes]) -> torch.Tensor:
+    """加载 .latent / .safetensors。source 可为本地路径或内存字节。"""
+    data, label = _load_safetensors_dict(source)
     return _pick_tensor(data, label)
+
+
+def load_safetensors_av(source: Union[str, bytes]):
+    """按音视频复合 latent 解析；不是 AV 容器返回 None。"""
+    data, label = _load_safetensors_dict(source)
+    return parse_av(data, label)
 
 
 def load_numpy(source: Union[str, bytes]) -> torch.Tensor:
@@ -228,15 +363,64 @@ def to_comfy_latent(tensor: torch.Tensor, source: str = "") -> dict:
     return {"samples": tensor}
 
 
+def parse_av_bytes(blob: bytes, url: str = ""):
+    """尝试按音视频复合 latent 解析；不是 AV 容器返回 None。
+
+    MiniMax H3 的 latent 是 NestedTensor(视频, 音频)，原生 SaveLatent 存不了
+    （它没有 .contiguous()），需要用专门的保存节点把两个张量分键存进一个
+    safetensors 容器。这里负责把它还原回 NestedTensor。
+    """
+    if not blob or not looks_like_safetensors(blob):
+        return None
+    try:
+        data, label = _load_safetensors_dict(blob)
+    except LatentParseError:
+        return None
+    return parse_av(data, label)
+
+
 def parse(blob: bytes, url: str = "") -> dict:
-    """一步到位：字节 -> ComfyUI LATENT dict。"""
+    """一步到位：字节 -> ComfyUI LATENT dict（自动识别音视频复合 latent）。"""
+    av = parse_av_bytes(blob, url)
+    if av is not None:
+        return av
     return to_comfy_latent(parse_latent_bytes(blob, url), url)
+
+
+def save_av_latent(
+    path: str,
+    video: torch.Tensor,
+    audio: torch.Tensor,
+    metadata: Optional[dict] = None,
+) -> str:
+    """把 (视频 latent, 音频 latent) 写成一个 safetensors 文件。
+
+    键名沿用社区约定 latent_0 / latent_1，并带上 latent_format_version_0
+    标记（读回时据此判断「不需要做 0.18215 补偿」）。
+    """
+    if safetensors is None:
+        raise LatentParseError("缺少 safetensors 依赖，请执行：pip install safetensors")
+
+    payload = {
+        "latent_0": video.detach().to("cpu").contiguous(),
+        "latent_1": audio.detach().to("cpu").contiguous(),
+        "latent_format_version_0": torch.tensor([]),
+        "tensor_count": torch.tensor([2]),
+    }
+    meta = {str(k): str(v) for k, v in (metadata or {}).items() if v is not None}
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    safetensors.torch.save_file(payload, path, metadata=meta)
+    return path
 
 
 __all__ = [
     "LatentParseError",
     "parse",
+    "parse_av_bytes",
     "parse_latent_bytes",
     "to_comfy_latent",
     "looks_like_safetensors",
+    "is_nested",
+    "make_nested",
+    "save_av_latent",
 ]

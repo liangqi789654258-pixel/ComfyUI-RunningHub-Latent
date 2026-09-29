@@ -87,18 +87,19 @@
       },
       "widgets_values": [
         "wan_2.1_vae.safetensors"
-      ]
+      ],
+      "title": "必须用视频 VAE（Wan 2.1）"
     },
     {
       "id": 3,
-      "type": "VAEDecode",
+      "type": "VAEDecodeTiled",
       "pos": [
         600,
         120
       ],
       "size": [
-        250,
-        60
+        270,
+        140
       ],
       "flags": {},
       "order": 2,
@@ -126,20 +127,26 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "VAEDecode"
+        "Node name for S&R": "VAEDecodeTiled"
       },
-      "widgets_values": []
+      "widgets_values": [
+        384,
+        64,
+        32,
+        8
+      ],
+      "title": "分块解码（时间维度也要分）"
     },
     {
       "id": 4,
-      "type": "SaveImage",
+      "type": "VHS_VideoCombine",
       "pos": [
-        910,
+        930,
         120
       ],
       "size": [
-        280,
-        280
+        330,
+        420
       ],
       "flags": {},
       "order": 3,
@@ -151,13 +158,26 @@
           "link": 3
         }
       ],
-      "outputs": [],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
       "properties": {
-        "Node name for S&R": "SaveImage"
+        "Node name for S&R": "VHS_VideoCombine"
       },
       "widgets_values": [
-        "RH_Video"
-      ]
+        16,
+        0,
+        "RH_Video",
+        "video/h264-mp4",
+        false,
+        true
+      ],
+      "title": "帧序列合成视频"
     },
     {
       "id": 5,
@@ -167,8 +187,8 @@
         690
       ],
       "size": [
-        640,
-        300
+        700,
+        380
       ],
       "flags": {},
       "order": 4,
@@ -179,7 +199,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "【视频 latent】\n视频 latent 是 5 维张量 [B, C, F, H, W]，必须用「支持视频的 VAE」\n（例如 Wan 系列自带的 VAE）解码，用 SD1.5/SDXL 的 VAE 会直接报错或出噪点。\n\n这里的 VAEDecode 输出的是帧序列 IMAGE。想直接合成视频文件，\n请安装 ComfyUI-VideoHelperSuite，把它换成 VHS_VideoCombine 节点。\n\n帧数越多，解码时中间态的 5D 张量越大。建议先 33~81 帧试跑，\n确认显存够用再往上加。timeout 建议给到 1800 以上。"
+        "【视频 latent】云端采样不占本地显存，本地只做 VAE 解码——这对 6GB 显卡是最大的价值：\nWan 类模型本地根本跑不动采样（本机 unet / clip 目录都是空的），但解码是能控制的。\n\n完整方案见 docs/video-guide.md。以下四个点最容易翻车：\n\n1. VAE 必须是「视频 VAE」（wan_2.1_vae，不是 wan2.2）。装错成图片 VAE 时\n   ComfyUI 不会报错，它静默只取第一帧（comfy/sd.py:1255 的 [:, :, 0]），\n   结果是你以为在出视频，实际只得到一张图。\n\n2. temporal_size 的单位是「像素帧」不是 latent 帧，源码会先除以时间压缩比 4。\n   填 16 → 一次解 4 个 latent 帧 → 输出 16 帧。默认 64 在 6GB 上必炸。\n   当前值 384 / 64 / 32 / 8 是针对 480p 的；上 720p 请改成 320 / 64 / 16 / 4。\n   显存放不下就继续降 temporal_size，它比 tile_size 见效快得多。\n\n3. 云端工作流末端必须是「保存Latent」，且不要留 SaveImage / VHS_VideoCombine——\n   留着的话云端会先白做一次解码，又慢又费额度。\n\n4. timeout 默认 600 秒对视频远远不够，先改 config.ini：timeout = 1200 起步。\n   720p/81帧 建议 2400。\n\n判断链路是否打通的唯一标准：report 里的「张量形状」必须是 5 维，\n例如 [1, 16, 9, 60, 104]（480p/33帧）。是 4 维就说明云端末端没接对。\n\n首次试跑请用 480p / 33 帧，成本最低。视频 latent 只有几 MB，传输不是瓶颈。"
       ]
     }
   ],

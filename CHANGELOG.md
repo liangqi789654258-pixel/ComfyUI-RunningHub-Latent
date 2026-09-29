@@ -2,6 +2,39 @@
 
 本项目所有值得记录的变更都会写在这里，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [1.3.0] - 2026-09-29
+
+### 新增：音视频复合 latent 支持（MiniMax H3）
+
+- **原生「保存Latent」存不了 H3 的 latent**：H3 的 latent 不是单个张量，而是
+  `NestedTensor((视频 [B,24,T,H/16,W/16], 音频 [B,32,2,T40]))`；原生
+  `SaveLatent` 里 `samples["samples"].contiguous()`（`nodes.py:552`）在
+  NestedTensor 上必然抛 `'NestedTensor' object has no attribute 'contiguous'`。
+  这不是接线错误，是原生节点没覆盖这种结构。
+- 新增 3 个节点：
+  - **RH AV Latent 保存**：替代原生 SaveLatent，把复合 latent 按
+    `latent_0`（视频）/ `latent_1`（音频）写进一个 safetensors 容器。
+    扩展名沿用 `.latent`，云端平台才会把它当作 latent 输出收录。
+  - **RH AV Latent 拆分**：拆成视频 / 音频两条普通 latent。原生 `VAEDecode`
+    遇到复合 latent 只取 `unbind()[0]`、音频被静默丢弃，所以这一步不能省。
+  - **RH AV Latent 合并**：把两条 latent 组装回 NestedTensor，供需要完整
+    复合 latent 的下游（如二采 / latent 放大）使用。
+- `core/latent.py` 新增复合 latent 解析：识别 `latent_0/latent_1`、
+  `h3_video/h3_audio` 等键名（兼容社区 `.h3latent` 包），并**固定不做
+  0.18215 缩放补偿**——H3 的 scale_factor 就是 1.0，误乘 5.49 倍画面会毁掉。
+- 输出分类新增 `.h3latent` / `.avlatent` 扩展名识别。
+- report 的形状回显区分音视频，显示为「视频 [...] + 音频 [...]」。
+- 新增 `extras/av_latent_nodes.py`：**云端用**的零依赖单文件节点包
+  （保存 + 拆分），可单独作为一个 custom_nodes 包安装到云端。
+- 新增示例 `examples/05_minimax_h3_av.json`（H3 本地解码链路，含音频合成）。
+- 新增文档 `docs/h3-av-latent.md`：失败原因逐行分析、三条路线对比、
+  云端/本地操作步骤、音频单独导出剪辑的三种做法、排障清单。
+
+### 测试
+
+- 自测 130 -> **146** 项，覆盖复合 latent 存取往返、不缩放、普通 latent
+  不被误判、新扩展名分类、拆分/合并节点与可读报错。
+
 ## [1.2.2] - 2026-09-29
 
 ### 修复

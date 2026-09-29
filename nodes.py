@@ -28,17 +28,28 @@ RunningHub 的参数注入接口要求必须给出 nodeId：
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+try:  # 保存 latent 用到；缺失时只影响「AV Latent 保存」节点
+    import safetensors.torch
+except Exception:  # pragma: no cover
+    safetensors = None
+
 from .core import cache as cache_mod
 from .core import client as client_mod
 from .core import latent as latent_mod
 from .core import settings as settings_mod
 from .core import workflow as wf_mod
+
+try:  # ComfyUI 提供；离线单测环境下允许缺失
+    import folder_paths
+except Exception:  # pragma: no cover
+    folder_paths = None
 
 CATEGORY = "RunningHub"
 
@@ -299,7 +310,11 @@ def _classify(item: Dict[str, Any]) -> str:
     # 去掉查询串再取扩展名（带签名的 URL 末尾通常是 ?token=...）
     url = url.split("?", 1)[0]
 
-    if any(h in file_type for h in _LATENT_HINTS) or url.endswith((".latent", ".safetensors")):
+    # .h3latent / .avlatent 是社区「H3 音视频 latent 保存节点」用的扩展名，
+    # 一并认作 latent，否则这类文件会被判成 unknown 而取不到。
+    if any(h in file_type for h in _LATENT_HINTS) or url.endswith(
+        (".latent", ".safetensors", ".h3latent", ".avlatent")
+    ):
         return "latent"
     if url.endswith(_VIDEO_EXT) or file_type in ("mp4", "webm"):
         return "video"
@@ -361,6 +376,21 @@ def _merge_latents(tensors: List[torch.Tensor]) -> torch.Tensor:
 def _fetch_latent_blob(url: str, timeout: float = 120.0) -> bytes:
     # 中文文件名 / 带签名参数的 URL 交给 requests 原样处理，不做任何手工编解码
     return cache_mod.download(url, timeout=timeout)
+
+
+def _describe_samples(samples: Any) -> str:
+    """把 latent 形状写成人类可读文本；音视频复合 latent 两个都列出来。"""
+    if samples is None:
+        return "（空）"
+    if latent_mod.is_nested(samples):
+        parts = [tuple(t.shape) for t in samples.unbind()]
+        if len(parts) >= 2:
+            return f"视频 {parts[0]} + 音频 {parts[1]}"
+        return f"视频 {parts[0]}"
+    try:
+        return str(tuple(samples.shape))
+    except Exception:  # pragma: no cover
+        return "（未知形状）"
 
 
 def _load_latent(blob: bytes, url: str) -> dict:
@@ -444,7 +474,7 @@ def _run_sampling(
                 "命中本地缓存，本次未消耗云端额度。",
                 f"工作流 ID：{workflow_id}",
                 f"缓存文件：{hit}",
-                f"张量形状：{tuple(result['samples'].shape)}",
+                f"张量形状：{_describe_samples(result.get('samples'))}",
             ]
             return (result, "cached", lines)
 
@@ -496,13 +526,15 @@ def _run_sampling(
     )
     shape = tuple(result["samples"].shape)
     kind = "视频 latent（5 维）" if len(shape) == 5 else "图像 latent（4 维）"
+    if latent_mod.is_nested(result.get("samples")):
+        kind = "音视频复合 latent（MiniMax H3 等）"
 
     other = [o for o in outputs if _classify(o) != "latent"]
     lines = [
         f"云端采样完成，本地已获得 {kind}。",
         f"taskId：{task_id}",
         f"工作流 ID：{workflow_id}",
-        f"张量形状：{shape}（batch={shape[0]}）",
+        f"张量形状：{_describe_samples(result.get('samples'))}（batch={shape[0]}）",
         f"生效随机种子：{effective_seed}",
     ]
     if len(urls) > 1:
@@ -964,11 +996,10 @@ class RunningHubLatentFetch:
                 f"任务 {task_id} 已返回成功但拿不到输出文件，可能已过期被清理。"
             )
         result, urls, _ = _resolve_outputs_to_latent(outputs, client=client)
-        shape = tuple(result["samples"].shape)
         report = (
             f"已从云端任务 {task_id} 取回 latent。\n"
             f"下载地址：{chr(10).join('  ' + u for u in urls)}\n"
-            f"张量形状：{shape}"
+            f"张量形状：{_describe_samples(result.get('samples'))}"
         )
         return (result, report)
 
@@ -1004,8 +1035,7 @@ class RunningHubLatentFromUrl:
         if not url:
             raise RHUserError("URL 为空。")
         result = _load_latent(_fetch_latent_blob(url, timeout=float(timeout)), url)
-        shape = tuple(result["samples"].shape)
-        return (result, f"已加载 {url}\n张量形状：{shape}")
+        return (result, f"已加载 {url}\n张量形状：{_describe_samples(result.get('samples'))}")
 
 
 # ---------------------------------------------------------------------------
@@ -1097,12 +1127,190 @@ class RunningHubWorkflowInspector:
         return ("\n".join(lines),)
 
 
+# ---------------------------------------------------------------------------
+# 节点 6-8：音视频复合 latent（MiniMax H3）
+# ---------------------------------------------------------------------------
+#
+# 背景：MiniMax H3 这类「一次生成视频+音频」的模型，它的 latent 不是单个张量，
+# 而是 comfy.nested_tensor.NestedTensor((视频 latent, 音频 latent))。
+#
+# 原生 SaveLatent 里有一行 samples["samples"].contiguous()，而 NestedTensor 是
+# 纯 Python 容器、根本没有 contiguous 方法，所以直接报
+#   AttributeError: 'NestedTensor' object has no attribute 'contiguous'
+# 这不是接线错误，是原生节点没覆盖这种数据结构。
+#
+# 下面三个节点就是为此准备的：保存（替代原生 SaveLatent）、拆分（分别解码）、
+# 合并（重新组装回 NestedTensor）。
+
+
+class RunningHubAVLatentSplit:
+    """把音视频复合 latent 拆成视频 / 音频两条，供各自的 VAE 解码。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"samples": ("LATENT",)}}
+
+    RETURN_TYPES = ("LATENT", "LATENT")
+    RETURN_NAMES = ("video", "audio")
+    FUNCTION = "split"
+    CATEGORY = CATEGORY
+    TITLE = "RH AV Latent 拆分"
+    DESCRIPTION = (
+        "把 MiniMax H3 的音视频复合 latent 拆成视频 latent 和音频 latent。\n"
+        "视频接 VAEDecode（H3 视频 VAE），音频接 VAEDecodeAudio（H3 音频 VAE）。\n"
+        "原生 VAEDecode 遇到复合 latent 时只解视频、静默丢弃音频，所以必须拆开。"
+    )
+
+    def split(self, samples: dict) -> Tuple[dict, dict]:
+        inner = (samples or {}).get("samples")
+        if not latent_mod.is_nested(inner):
+            raise RHUserError(
+                "输入的不是音视频复合 latent（NestedTensor），无需拆分。\n"
+                "普通工作流的 latent 是单个张量，直接接 VAEDecode 即可。\n"
+                "如果你确实在跑 MiniMax H3，请检查上游是否真的是 H3 采样器的输出。"
+            )
+        parts = list(inner.unbind())
+        if len(parts) < 2:
+            raise RHUserError(
+                f"复合 latent 里只有 {len(parts)} 个张量，无法拆出音频。\n"
+                "请确认上游是 H3 采样器的输出，而不是被其它节点改写过。"
+            )
+        video, audio = parts[0], parts[1]
+        noise_mask = (samples or {}).get("noise_mask")
+        out_video: Dict[str, Any] = {"samples": video}
+        out_audio: Dict[str, Any] = {"samples": audio}
+        if noise_mask is not None:
+            out_video["noise_mask"] = noise_mask
+        return (out_video, out_audio)
+
+
+class RunningHubAVLatentMerge:
+    """把视频 latent + 音频 latent 重新组装成音视频复合 latent。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"video": ("LATENT",)},
+            "optional": {"audio": ("LATENT",)},
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "merge"
+    CATEGORY = CATEGORY
+    TITLE = "RH AV Latent 合并"
+    DESCRIPTION = (
+        "把视频 latent 与音频 latent 组装回音视频复合 latent（NestedTensor）。\n"
+        "用于需要完整复合 latent 的下游节点（例如 H3 latent 放大 / 二次采样）。\n"
+        "若只是为了分别解码，用「RH AV Latent 拆分」即可，不需要合并。"
+    )
+
+    def merge(self, video: dict, audio: Optional[dict] = None) -> Tuple[dict]:
+        v = (video or {}).get("samples")
+        if v is None:
+            raise RHUserError("video 输入为空。")
+        if audio is None:
+            return (video,)
+        a = (audio or {}).get("samples")
+        if a is None:
+            return (video,)
+        merged: Dict[str, Any] = {"samples": latent_mod.make_nested(v, a)}
+        return (merged,)
+
+
+class RunningHubAVLatentSave:
+    """替代原生 SaveLatent —— 能存原生节点存不了的音视频复合 latent。"""
+
+    def __init__(self):
+        self.output_dir = None
+        if folder_paths is not None:
+            try:
+                self.output_dir = folder_paths.get_output_directory()
+            except Exception:  # pragma: no cover
+                self.output_dir = None
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                "filename_prefix": ("STRING", {"default": "latents/MiniMaxH3"}),
+            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("samples",)
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = CATEGORY
+    TITLE = "RH AV Latent 保存"
+    DESCRIPTION = (
+        "保存音视频复合 latent（MiniMax H3）。原生 SaveLatent 遇到这类 latent 会报\n"
+        "'NestedTensor' object has no attribute 'contiguous'，本节点用来替代它。\n"
+        "扩展名沿用 .latent，云端平台才会把它当作 latent 输出收录到任务结果里。\n"
+        "普通单张量 latent 也能存（此时等价于原生 SaveLatent）。"
+    )
+
+    def save(
+        self,
+        samples: dict,
+        filename_prefix: str = "latents/MiniMaxH3",
+        prompt=None,
+        extra_pnginfo=None,
+    ):
+        if self.output_dir is None:
+            raise RHUserError(
+                "拿不到 ComfyUI 输出目录（folder_paths 不可用）。请确认本节点运行在 ComfyUI 内。"
+            )
+        inner = (samples or {}).get("samples")
+        if inner is None:
+            raise RHUserError("输入的 latent 为空。")
+
+        full_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, self.output_dir
+        )
+        file = f"{filename}_{counter:05}_.latent"
+        path = os.path.join(full_folder, file)
+
+        metadata = {}
+        if prompt is not None:
+            metadata["prompt"] = json.dumps(prompt)
+        for key, value in (extra_pnginfo or {}).items():
+            metadata[str(key)] = json.dumps(value)
+
+        if latent_mod.is_nested(inner):
+            parts = list(inner.unbind())
+            if len(parts) < 2:
+                raise RHUserError(
+                    f"复合 latent 只有 {len(parts)} 个张量，至少需要视频+音频两个。"
+                )
+            latent_mod.save_av_latent(path, parts[0], parts[1], metadata=metadata)
+        else:
+            # 单张量：按原生 SaveLatent 的格式写，保证 LoadLatent 也能读
+            payload = {
+                "latent_tensor": inner.detach().to("cpu").contiguous(),
+                "latent_format_version_0": torch.tensor([]),
+            }
+            safetensors.torch.save_file(payload, path, metadata=metadata)
+
+        return {
+            "ui": {
+                "latents": [{"filename": file, "subfolder": subfolder, "type": "output"}]
+            },
+            "result": (samples,),
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     "RunningHubLatentGeneratorSimple": RunningHubLatentGeneratorSimple,
     "RunningHubLatentGenerator": RunningHubLatentGenerator,
     "RunningHubLatentFetch": RunningHubLatentFetch,
     "RunningHubLatentFromUrl": RunningHubLatentFromUrl,
     "RunningHubWorkflowInspector": RunningHubWorkflowInspector,
+    "RunningHubAVLatentSplit": RunningHubAVLatentSplit,
+    "RunningHubAVLatentMerge": RunningHubAVLatentMerge,
+    "RunningHubAVLatentSave": RunningHubAVLatentSave,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

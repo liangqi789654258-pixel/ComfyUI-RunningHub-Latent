@@ -1,0 +1,388 @@
+{
+  "last_node_id": 8,
+  "last_link_id": 7,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "RunningHubLatentGenerator",
+      "pos": [
+        60,
+        60
+      ],
+      "size": [
+        480,
+        470
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "task_id",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RunningHubLatentGenerator"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "",
+        "a person talking, natural lighting",
+        "blurry, watermark",
+        0,
+        2400,
+        5,
+        true,
+        false,
+        true
+      ],
+      "title": "RH 云端采样 · 专业版（H3）"
+    },
+    {
+      "id": 2,
+      "type": "RunningHubAVLatentSplit",
+      "pos": [
+        600,
+        60
+      ],
+      "size": [
+        280,
+        80
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "LATENT",
+          "links": [
+            2
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "audio",
+          "type": "LATENT",
+          "links": [
+            5
+          ],
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RunningHubAVLatentSplit"
+      },
+      "widgets_values": [],
+      "title": "必须拆开：不拆会丢音频"
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        60,
+        600
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "h3_video_vae.safetensors"
+      ],
+      "title": "H3 视频 VAE（换成你的文件名）"
+    },
+    {
+      "id": 4,
+      "type": "VAEDecode",
+      "pos": [
+        950,
+        120
+      ],
+      "size": [
+        240,
+        50
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 2
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            4
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": [],
+      "title": "解视频"
+    },
+    {
+      "id": 5,
+      "type": "VAELoader",
+      "pos": [
+        60,
+        700
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            6
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "h3_audio_vae.safetensors"
+      ],
+      "title": "H3 音频 VAE（换成你的文件名）"
+    },
+    {
+      "id": 6,
+      "type": "VAEDecodeAudio",
+      "pos": [
+        950,
+        260
+      ],
+      "size": [
+        240,
+        50
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 5
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            7
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecodeAudio"
+      },
+      "widgets_values": [],
+      "title": "解音频"
+    },
+    {
+      "id": 7,
+      "type": "VHS_VideoCombine",
+      "pos": [
+        1280,
+        120
+      ],
+      "size": [
+        330,
+        420
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 4
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VHS_VideoCombine"
+      },
+      "widgets_values": [
+        24,
+        0,
+        "RH_H3",
+        "video/h264-mp4",
+        false,
+        true
+      ],
+      "title": "H3 是 24fps，别用 16"
+    },
+    {
+      "id": 8,
+      "type": "Note",
+      "pos": [
+        60,
+        790
+      ],
+      "size": [
+        760,
+        470
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Note"
+      },
+      "widgets_values": [
+        "【MiniMax H3：云端采样 + 本地解码】完整方案见 docs/h3-av-latent.md\n\n■ 为什么原生「保存Latent」存不了 H3\nH3 的 latent 不是单个张量，而是 NestedTensor((视频 [B,24,T,H/16,W/16], 音频 [B,32,2,T40]))。\n原生 SaveLatent 里有一行 samples[\"samples\"].contiguous()（nodes.py:552），\n而 NestedTensor 是纯 Python 容器、没有 contiguous 方法，直接抛：\n    AttributeError: 'NestedTensor' object has no attribute 'contiguous'\n不是接线错，是原生节点没覆盖这种结构。\n\n■ 云端要做的两件事\n1. 装「AV Latent 保存」节点（extras/av_latent_nodes.py，零依赖），用它替掉原生保存Latent。\n   扩展名仍是 .latent，平台才会把它当 latent 输出收录。\n   注意：别让云端同时留着 VAEDecode / VHS_VideoCombine，否则白做一次解码。\n2. 采样器输出 → AV Latent 保存。一次同时带回视频和音频 latent，音频不会丢。\n\n■ 本地（本工作流）\nRH 云端采样 → AV Latent 拆分 → 视频走 VAEDecode、音频走 VAEDecodeAudio → VHS 合成。\n「拆分」这步不能省：原生 VAEDecode 遇到复合 latent 只取 unbind()[0]（视频），\n音频被静默丢弃且不报错。\n\n■ 三个必填的本地模型（放 models/vae，VAELoader 能自动识别）\n  H3 视频 VAE   fp16 约 5.2GB / int8 约 2.8GB\n  H3 音频 VAE   约 0.6GB\n  两个 VAELoader 的 widget 请换成你自己的文件名。\n\n■ 参数\n  帧率 24（H3 是 24fps，不是 Wan 的 16）；音频输出 32kHz 立体声。\n  124 帧 768x1344 的视频 latent 约 14MB，传输从来不是瓶颈。\n  timeout 给 2400 起步（33B 模型采样很慢）。\n\n■ 想单独剪辑音频\n  在「解音频」后面接 SaveAudio / SaveAudioMP3 就能导出独立音轨；\n  或者干脆在云端用 VAEDecodeAudio + SaveAudioMP3 存文件，本地用 LoadAudio 合成。\n\n■ 排障\n  report 的「张量形状」显示「视频 [...] + 音频 [...]」= AV 链路打通；\n  只显示单个形状 = 云端存的不是复合 latent，检查云端末端接的是不是 AV Latent 保存节点。"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "LATENT"
+    ],
+    [
+      2,
+      2,
+      0,
+      4,
+      0,
+      "LATENT"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      1,
+      "VAE"
+    ],
+    [
+      4,
+      4,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      5,
+      2,
+      1,
+      6,
+      0,
+      "LATENT"
+    ],
+    [
+      6,
+      5,
+      0,
+      6,
+      1,
+      "VAE"
+    ],
+    [
+      7,
+      6,
+      0,
+      7,
+      1,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
