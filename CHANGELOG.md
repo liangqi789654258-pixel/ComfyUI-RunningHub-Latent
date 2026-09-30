@@ -2,6 +2,36 @@
 
 本项目所有值得记录的变更都会写在这里，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [1.3.1] - 2026-09-30
+
+### 文档：确认 RunningHub 不允许安装自定义节点，H3 路线改为「云端出片 + 独立音轨」
+
+平台事实（用户确认）：RunningHub 云端不接受用户自行上传安装自定义节点，
+但预装了大量主流节点。这条约束让 v1.3.0 的「路线 A（复合 latent 带回本地）」
+在 RunningHub 上不可行——要修 `SaveLatent` 对 `NestedTensor` 报错，就必须换节点。
+
+已核实核心里也没有替代方案（`nodes_minimax_h3.py` 与 latent 相关的节点
+只有 `EmptyMiniMaxH3LatentAV` 一个，且无条件同时造视频+音频两个张量；
+`NestedTensor.__getitem__/chunk` 返回的仍是 NestedTensor，切不散）。
+
+因此 H3 在 RunningHub 上的正确用法改为：
+
+    H3 采样器 →┬─ VAEDecode(H3 视频 VAE)      → VHS_VideoCombine(24fps) → mp4
+               └─ VAEDecodeAudio(H3 音频 VAE) → Save Audio (Advanced)   → flac/mp3
+
+音频必须显式接一路 `VAEDecodeAudio`（`nodes_audio.py:100` 取 `unbind()[-1]`），
+否则 `VAEDecode` 只取 `unbind()[0]` 会把音频静默丢掉。帧率 24、音频 32kHz。
+
+改动：
+
+- `docs/h3-av-latent.md` 重写：路线 C 升为默认；路线 A/B 标注仅适用于
+  允许装自定义节点的环境（本地 / 自建云端 / 其它平台）；新增 2 分钟云端自查
+  （万一平台自带能存 AV latent 的节点，路线 A 可复活）
+- README：节点表加平台限制说明；视频章节与 FAQ 的 H3 条目改为云端出片方案
+- `extras/av_latent_nodes.py`：文件头注明 RunningHub 装不了，改用路线 C
+
+代码逻辑未变，自测仍为 146 项。
+
 ## [1.3.0] - 2026-09-29
 
 ### 新增：音视频复合 latent 支持（MiniMax H3）

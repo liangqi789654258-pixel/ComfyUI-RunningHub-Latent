@@ -28,6 +28,17 @@ NestedTensor 是纯 Python 容器，没有 contiguous 方法，于是直接抛�
 
     ComfyUI/custom_nodes/RH-AVLatent/__init__.py   <- 本文件内容
 
+**重要：RunningHub 云端装不了这个包。**
+RunningHub 不接受用户自行上传安装自定义节点（2026-09-30 确认），
+所以在 RunningHub 上跑 MiniMax H3 时，本文件的节点用不上。
+H3 在 RunningHub 上的正确用法是「云端整体出片 + 音频单独导出」：
+
+    H3 采样器 →┬─ VAEDecode(H3 视频 VAE)      → VHS_VideoCombine(24fps) → mp4
+               └─ VAEDecodeAudio(H3 音频 VAE) → Save Audio (Advanced)   → flac/mp3
+
+本文件的节点保留给以下场景：本地运行 H3、自建 ComfyUI 云端实例、
+或其它允许安装自定义节点的平台。详见 docs/h3-av-latent.md。
+
 不需要 pip install 任何东西（只用到 torch / safetensors / folder_paths，
 这些都是 ComfyUI 自带）。重启 ComfyUI 后在「model/latent」分类里能找到。
 

@@ -120,9 +120,14 @@ poll_interval = 5
 | **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
 | **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
 | **RH 工作流参数探查** | 拉取云端工作流结构与可改参数，并判断能否自动定位 | 第一次配某条工作流时 |
-| **RH AV Latent 保存** | 替代原生「保存Latent」，能存 MiniMax H3 的音视频复合 latent | 云端跑 H3 时必用 |
+| **RH AV Latent 保存** | 替代原生「保存Latent」，能存 MiniMax H3 的音视频复合 latent | 本地跑 H3 / 自建云端时（RunningHub 不允许装自定义节点，见下） |
 | **RH AV Latent 拆分** | 把复合 latent 拆成视频 / 音频两条，分别解码 | H3 本地解码必用 |
 | **RH AV Latent 合并** | 把视频 + 音频 latent 组装回复合 latent | 二采 / latent 放大 |
+
+> **平台限制（2026-09-30 确认）**：RunningHub 云端**不接受用户上传安装自定义节点**，
+> 所以上面这 3 个 AV 节点**装不到 RunningHub 上**。H3 在 RunningHub 上的正确用法是
+> 「云端出片 + 音频单独导出」，详见 [`docs/h3-av-latent.md`](docs/h3-av-latent.md)。
+> 这 3 个节点保留给本地运行 H3、自建云端，或其它允许装节点的平台。
 
 ### 两个版本怎么选
 
@@ -231,9 +236,18 @@ use_high_performance 全部走 config.ini（见下），不占画布。
 **MiniMax H3 这类「一次同时生成视频和音频」的模型** 见
 [`docs/h3-av-latent.md`](docs/h3-av-latent.md)。要点：H3 的 latent 不是单个张量，
 而是 `NestedTensor(视频 latent, 音频 latent)`，原生「保存Latent」存不了它
-（会报 `'NestedTensor' object has no attribute 'contiguous'`），需要改用
-**RH AV Latent 保存** 节点；拿回本地后必须先用 **RH AV Latent 拆分** 拆成两条再
-分别解码，否则音频会被静默丢弃。
+（会报 `'NestedTensor' object has no attribute 'contiguous'`）。
+
+在 RunningHub 上**换不了节点**（云端不让装自定义节点），所以 H3 走
+**云端整体出片、音频单独导出**：
+
+```
+H3 采样器 →┬─ VAEDecode(H3 视频 VAE)      → VHS_VideoCombine(24fps) → mp4
+           └─ VAEDecodeAudio(H3 音频 VAE) → Save Audio (Advanced)   → flac/mp3
+```
+
+音频必须**显式**接一路 `VAEDecodeAudio`，否则会被静默丢弃。H3 是 **24fps / 32kHz**，
+别按 Wan 的 16fps 填。
 
 ## 常见问题排查
 
@@ -294,8 +308,10 @@ VAE 解码（SDXL 的 latent 用 SD1.5 的 VAE 解码必崩）。参考云端工
 
 **云端报 `'NestedTensor' object has no attribute 'contiguous'`**
 这是 MiniMax H3 专用场景。H3 的 latent 是「视频 + 音频」的复合对象，原生
-「保存Latent」处理不了，换成 **RH AV Latent 保存** 节点即可。
-拿回本地后记得用 **RH AV Latent 拆分** 拆开再解码——不拆的话音频会被静默丢掉。
+「保存Latent」处理不了。**在 RunningHub 上换不了节点**（云端不让装自定义节点），
+所以改成：视频走 `VAEDecode`、音频**另接一路** `VAEDecodeAudio` 分别出片，
+音频再用 `Save Audio (Advanced)` 导出独立音轨去剪辑。
+（本地跑 H3 或自建云端时，可用 **RH AV Latent 保存** + **RH AV Latent 拆分**。）
 完整说明见 [`docs/h3-av-latent.md`](docs/h3-av-latent.md)。
 
 **生成到一半卡住**
