@@ -233,6 +233,12 @@ use_high_performance 全部走 config.ini（见下），不占画布。
 **端到端视频出片（云端工作流怎么搭、参数速查、分步验证清单、故障速查表）** 见
 [`docs/video-guide.md`](docs/video-guide.md)。
 
+**参数注入的平台契约盘点（RunningHub 官方规则取证：错误码、可注入性、回显通道）** 见
+[`docs/platform-contract.md`](docs/platform-contract.md)。排查"参数不生效"时先看这里：
+最实用的一条是 **`nodeId`/`fieldName` 写错会返回 `803` 硬失败**（不会静默用默认值），
+以及 **create 响应的 `promptTips` 能直接看出哪个节点校验不过**。
+真机探测脚本：`tools/probe_platform.py`（默认只跑零成本层）。
+
 **MiniMax H3 这类「一次同时生成视频和音频」的模型** 见
 [`docs/h3-av-latent.md`](docs/h3-av-latent.md)。要点：H3 的 latent 不是单个张量，
 而是 `NestedTensor(视频 latent, 音频 latent)`，原生「保存Latent」存不了它
