@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "case_id": "c6a-no-placeholder-direct",
+  "form": "no-placeholder",
+  "description": "无占位符但结构最简：编码节点直连采样器，文本里写的是完整默认提示词。代表一类「作者没有声明参数协议、但拓扑很直白」的工作流，是兜底路径设计时所针对的形态。",
+  "tags": [
+    "no-placeholder",
+    "direct"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":\"a photo of a cat\",\"clip\":[\"1\",1]}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":\"blurry, low quality\",\"clip\":[\"1\",1]}},\"10\":{\"class_type\":\"KSampler\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":31415926,\"control_after_generate\":\"randomize\",\"steps\":20,\"cfg\":7.0,\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"latent_image\":[\"4\",0]}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"10\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"10\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "6",
+        "field": "text"
+      }
+    ],
+    "negative": [
+      {
+        "node": "7",
+        "field": "text"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "无占位符时只能靠结构定位，本例拓扑直白，落点唯一。"
+  },
+  "expect_current": {
+    "status": "already_ok",
+    "why": "占位符 0 命中触发兜底：采样器连线源自带 text 字段且文本是字面量，正负两端各命中 1 处（整值覆盖）。"
+  }
+}

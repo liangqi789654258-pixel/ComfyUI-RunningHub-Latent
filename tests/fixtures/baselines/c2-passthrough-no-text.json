@@ -1,0 +1,30 @@
+{
+  "case_id": "c2-passthrough-no-text",
+  "diagnosis": {
+    "negative": "连线目标 nodeId=20 没有 text 字段（class_type=ImageToVideoConditioning），无法作为提示词落点",
+    "positive": "连线目标 nodeId=20 没有 text 字段（class_type=ImageToVideoConditioning），无法作为提示词落点"
+  },
+  "expect_current": {
+    "status": "regression_open",
+    "why": "兜底路径要求采样器 positive/negative 的连线源节点自带 text 字段，透传型条件构造节点没有该字段，于是在该判断处直接放弃；工作流里又没有任何占位符，主路径同样是 0 命中 → 不产生注入且不报错。"
+  },
+  "hit_stats": {
+    "negative": 0,
+    "positive": 0
+  },
+  "injections": [],
+  "link_field_count": 13,
+  "node_count": 9,
+  "placeholder_hits": {
+    "negative": 0,
+    "positive": 0
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 9
+}

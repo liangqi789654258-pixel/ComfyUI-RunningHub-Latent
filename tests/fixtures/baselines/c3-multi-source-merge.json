@@ -1,0 +1,47 @@
+{
+  "case_id": "c3-multi-source-merge",
+  "diagnosis": {
+    "negative": "连线目标 nodeId=22 没有 text 字段（class_type=ConditioningCombine），无法作为提示词落点",
+    "positive": "连线目标 nodeId=20 没有 text 字段（class_type=ConditioningCombine），无法作为提示词落点"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "部分覆盖",
+    "why": "占位符主路径按「扫描全部字符串字段」工作，只替换写了占位符的那一路（正端 2 处命中），未写占位符的负端第二路不会被注入，且实现不会上报「只覆盖了部分源」—— 部分覆盖 既不是全覆盖、也不是拒绝猜测，是静默的第三种状态；一旦工作流没有占位符，兜底路径完全没有多源概念，会整体退回 0 命中。"
+  },
+  "hit_stats": {
+    "negative": 1,
+    "positive": 2
+  },
+  "injections": [
+    {
+      "fieldName": "text",
+      "fieldValue": "a photo of a cat, <<POS_SENTINEL>>",
+      "nodeId": "6"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "<<NEG_SENTINEL>>",
+      "nodeId": "7"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "cinematic lighting, <<POS_SENTINEL>>",
+      "nodeId": "21"
+    }
+  ],
+  "link_field_count": 15,
+  "node_count": 11,
+  "placeholder_hits": {
+    "negative": 1,
+    "positive": 2
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 9
+}

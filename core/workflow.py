@@ -44,11 +44,25 @@ _TEXT_FIELD_ORDER = (
     "text_a", "text_b", "text_g", "text_l", "wildcard",
 )
 
+# 节点直属的「执行态」字段：ComfyUI 前端格式用 mode（0 执行 / 2 mute / 4 bypass），
+# 部分导出格式直接用 bypass / muted 之类的布尔字段。这些是平台侧的通用字段，
+# 不是某个工作流的私有字段，归一化时一并收进 meta，省得下游再去翻原始响应。
+_NODE_STATE_KEYS = (
+    "mode",
+    "bypass", "bypassed", "is_bypassed", "isBypassed",
+    "mute", "muted", "is_muted", "isMuted",
+    "disabled", "is_disabled",
+)
+
 
 def normalize(data: Any) -> Dict[str, Dict[str, Any]]:
     """把各种形态的工作流响应归一化成：
 
-        {nodeId(str): {"class_type": str, "inputs": {字段名: 值}}}
+        {nodeId(str): {"class_type": str, "inputs": {...}, "meta": {...}}}
+
+    `meta` = 平台返回的 `_meta`（用户自定义节点标题就在 `_meta.title`）再合并
+    节点直属的执行态字段（mode / bypass / mute …）。以前这一层被整个丢掉，
+    等于把平台白送的语义线索扔了，S2 的 Snapshot 又必须要有它。
 
     兼容的输入形态（都是实际遇到过的）：
       * ComfyUI prompt 格式：{"3": {"class_type": "KSampler", "inputs": {...}}}
@@ -91,7 +105,11 @@ def normalize(data: Any) -> Dict[str, Dict[str, Any]]:
             inputs = meta.get("inputs")
             if not isinstance(inputs, dict):
                 inputs = {}
-            out[str(key)] = {"class_type": class_type, "inputs": inputs}
+            out[str(key)] = {
+                "class_type": class_type,
+                "inputs": inputs,
+                "meta": _collect_meta(meta),
+            }
         return out
 
     # 形态 B：{"nodes": [...]}
@@ -110,10 +128,24 @@ def normalize(data: Any) -> Dict[str, Dict[str, Any]]:
                 inputs = {}
             # 部分导出格式把参数放在 widgets_values 里，字段名需要从
             # widgets 描述里取，这里做不到可靠映射，因此只保留能识别的 inputs
-            out[str(node_id)] = {"class_type": class_type, "inputs": inputs}
+            out[str(node_id)] = {
+                "class_type": class_type,
+                "inputs": inputs,
+                "meta": _collect_meta(node),
+            }
         return out
 
     return {}
+
+
+def _collect_meta(node: Dict[str, Any]) -> Dict[str, Any]:
+    """汇总节点的元信息：平台 `_meta` + 节点直属的执行态字段。"""
+    raw = node.get("_meta")
+    meta: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    for key in _NODE_STATE_KEYS:
+        if key in node and key not in meta:
+            meta[key] = node[key]
+    return meta
 
 
 def _looks_like_prompt(data: Dict[str, Any]) -> bool:
@@ -482,7 +514,14 @@ def describe(structure: Dict[str, Dict[str, Any]], limit: int = 60) -> str:
         }
         if not fields:
             continue
-        lines.append(f"● nodeId={node_id}  [{class_type}]")
+        # 用户自定义的节点标题（_meta.title）比 class_type 更能说明这个节点是干什么的，
+        # 探查清单里带上它，用户才知道该往哪注入；默认标题等于类型名时就不重复显示。
+        node_meta = meta.get("meta")
+        title = str(node_meta.get("title") or "") if isinstance(node_meta, dict) else ""
+        if title and title != class_type:
+            lines.append(f"● nodeId={node_id}  [{class_type}]  「{title}」")
+        else:
+            lines.append(f"● nodeId={node_id}  [{class_type}]")
         for name in sorted(fields.keys()):
             shown = str(fields[name])
             if len(shown) > limit:

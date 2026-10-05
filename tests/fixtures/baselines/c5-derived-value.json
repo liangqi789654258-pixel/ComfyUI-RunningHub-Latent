@@ -1,0 +1,42 @@
+{
+  "case_id": "c5-derived-value",
+  "diagnosis": {
+    "negative": "nodeId=7 的 text 由上游连线（nodeId=62）接管，本插件无法就地覆盖，且上游也找不到唯一的文本字段",
+    "positive": "nodeId=6 的 text 由上游连线（nodeId=60）接管，本插件无法就地覆盖，且上游也找不到唯一的文本字段"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "§3.5 唯一即默认采用",
+    "why": "兜底路径沿操作数上溯，遇到「上游只有一个字符串字段」就认定唯一并直接采用 —— 这正是架构文档 §3.5 唯一即默认采用 明令禁止的拓扑假设；本例因此落到派生节点 TextTransform 的模板前缀 prefix（nodeId 60 / 62），而非人工判断的叶子字面量（61 / 63 的 value），且实现不会标注「间接绑定」；标量端口（steps / cfg）为派生连线，完全没有解析器。"
+  },
+  "hit_stats": {
+    "negative": 1,
+    "positive": 1
+  },
+  "injections": [
+    {
+      "fieldName": "prefix",
+      "fieldValue": "<<POS_SENTINEL>>",
+      "nodeId": "60"
+    },
+    {
+      "fieldName": "prefix",
+      "fieldValue": "<<NEG_SENTINEL>>",
+      "nodeId": "62"
+    }
+  ],
+  "link_field_count": 17,
+  "node_count": 14,
+  "placeholder_hits": {
+    "negative": 0,
+    "positive": 0
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 10
+}

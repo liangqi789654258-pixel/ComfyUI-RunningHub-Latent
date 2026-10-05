@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "case_id": "c2-passthrough-no-text",
+  "form": "passthrough",
+  "description": "条件链上存在透传型中间节点：文本编码节点 → 条件构造节点（重新吐出 positive / negative / latent，自身没有 text 字段）→ 采样器。代表一类「条件在图中间被重写/重组」的视频与高级采样模板的常见形态。",
+  "tags": [
+    "passthrough",
+    "no-placeholder"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":832,\"height\":480,\"batch_size\":1}},\"5\":{\"class_type\":\"LoadImage\",\"_meta\":{\"title\":\"参考图\"},\"inputs\":{\"image\":\"example.png\",\"upload\":\"image\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":\"a photo of a cat\",\"clip\":[\"1\",1]}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":\"blurry, low quality\",\"clip\":[\"1\",1]}},\"20\":{\"class_type\":\"ImageToVideoConditioning\",\"_meta\":{\"title\":\"视频条件构造（透传）\"},\"inputs\":{\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"vae\":[\"1\",2],\"start_image\":[\"5\",0],\"width\":832,\"height\":480,\"length\":81,\"batch_size\":1}},\"10\":{\"class_type\":\"KSamplerAdvanced\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":4242424242,\"control_after_generate\":\"randomize\",\"steps\":4,\"cfg\":1.0,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"20\",0],\"negative\":[\"20\",1],\"latent_image\":[\"20\",2],\"start_at_step\":0,\"end_at_step\":4}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"10\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"10\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "6",
+        "field": "text"
+      }
+    ],
+    "negative": [
+      {
+        "node": "7",
+        "field": "text"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "真正可写的落点在条件构造节点上游的编码节点上，需要穿越中间节点才能到达。"
+  },
+  "expect_current": {
+    "status": "regression_open",
+    "why": "兜底路径要求采样器 positive/negative 的连线源节点自带 text 字段，透传型条件构造节点没有该字段，于是在该判断处直接放弃；工作流里又没有任何占位符，主路径同样是 0 命中 → 不产生注入且不报错。"
+  }
+}

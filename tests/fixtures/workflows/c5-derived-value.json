@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "case_id": "c5-derived-value",
+  "form": "derived-value",
+  "description": "派生值形态：提示词编码节点的文本与采样器的标量参数都不是字面量，而是由文本加工 / 表达式计算类节点产出，需要沿操作数上溯才能找到可写的字面量来源。代表一类「参数经计算节点派生」的工作流。",
+  "tags": [
+    "derived",
+    "upstream-hop",
+    "no-placeholder",
+    "linked-scalar"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":[\"60\",0],\"clip\":[\"1\",1]}},\"60\":{\"class_type\":\"TextTransform\",\"_meta\":{\"title\":\"文本加工·正\"},\"inputs\":{\"prefix\":\"masterpiece, \",\"text\":[\"61\",0]}},\"61\":{\"class_type\":\"PrimitiveString\",\"_meta\":{\"title\":\"正提示词源\"},\"inputs\":{\"value\":\"a cat sitting on a bench\"}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":[\"62\",0],\"clip\":[\"1\",1]}},\"62\":{\"class_type\":\"TextTransform\",\"_meta\":{\"title\":\"文本加工·负\"},\"inputs\":{\"prefix\":\"bad quality, \",\"text\":[\"63\",0]}},\"63\":{\"class_type\":\"PrimitiveString\",\"_meta\":{\"title\":\"负提示词源\"},\"inputs\":{\"value\":\"blurry\"}},\"70\":{\"class_type\":\"MathExpression\",\"_meta\":{\"title\":\"步数计算\"},\"inputs\":{\"operation\":\"multiply\",\"a\":[\"71\",0],\"b\":[\"72\",0]}},\"71\":{\"class_type\":\"PrimitiveInt\",\"_meta\":{\"title\":\"基数\"},\"inputs\":{\"value\":20}},\"72\":{\"class_type\":\"PrimitiveInt\",\"_meta\":{\"title\":\"倍数\"},\"inputs\":{\"value\":2}},\"10\":{\"class_type\":\"KSamplerAdvanced\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":555000111,\"control_after_generate\":\"randomize\",\"steps\":[\"70\",0],\"cfg\":[\"70\",1],\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"latent_image\":[\"4\",0],\"start_at_step\":0,\"end_at_step\":10000}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"10\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"10\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "61",
+        "field": "value"
+      }
+    ],
+    "negative": [
+      {
+        "node": "63",
+        "field": "value"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "人工判断：真正承载提示词主体的是链路末端的字面量源（61 / 63 的 value）；派生节点上的 prefix 只是模板前缀，覆盖它会破坏模板而且语义不对。"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "§3.5 唯一即默认采用",
+    "why": "兜底路径沿操作数上溯，遇到「上游只有一个字符串字段」就认定唯一并直接采用 —— 这正是架构文档 §3.5 唯一即默认采用 明令禁止的拓扑假设；本例因此落到派生节点 TextTransform 的模板前缀 prefix（nodeId 60 / 62），而非人工判断的叶子字面量（61 / 63 的 value），且实现不会标注「间接绑定」；标量端口（steps / cfg）为派生连线，完全没有解析器。"
+  }
+}

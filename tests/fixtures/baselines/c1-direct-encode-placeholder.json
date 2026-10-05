@@ -1,0 +1,41 @@
+{
+  "case_id": "c1-direct-encode-placeholder",
+  "diagnosis": {
+    "negative": "云端结构里 nodeId=7 的 text 不可写入",
+    "positive": "云端结构里 nodeId=6 的 text 不可写入"
+  },
+  "expect_current": {
+    "status": "already_ok",
+    "why": "占位符主路径扫描全部字符串字段并做子串替换，编码节点直连采样器不含中间节点，因此正负两端各命中 1 处。"
+  },
+  "hit_stats": {
+    "negative": 1,
+    "positive": 1
+  },
+  "injections": [
+    {
+      "fieldName": "text",
+      "fieldValue": "<<POS_SENTINEL>>",
+      "nodeId": "6"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "<<NEG_SENTINEL>>",
+      "nodeId": "7"
+    }
+  ],
+  "link_field_count": 9,
+  "node_count": 7,
+  "placeholder_hits": {
+    "negative": 1,
+    "positive": 1
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 7
+}

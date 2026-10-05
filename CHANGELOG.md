@@ -2,6 +2,25 @@
 
 本项目所有值得记录的变更都会写在这里，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [未发布] - 通用参数注入重构 S2：发现层 + Snapshot 模型
+
+新增 `core/snapshot.py`：把 `getJsonApiFormat` 的原始结构固化成带标注的快照——
+每个字段标注 `value_kind`（字面量 / 连线 / 未知，用于守住不变量 A）、
+每个节点标注执行态（active / bypassed / muted，用于守住不变量 B）、
+整张图抽成连线边列表，并提供两个指纹（全量 / 纯拓扑）与 diff，
+从而让「云端工作流被改后绑定静默失效」可被检出。
+
+`core/workflow.py:normalize()` 原先会丢弃平台返回的 `_meta`（含用户自定义节点标题
+`_meta.title`），现已连同节点直属执行态字段一起保留在 `meta` 里；
+`class_type` / `inputs` 两个键不变，既有调用方与自测无需改动。
+「RH 工作流参数探查」的清单里现在会显示节点标题。
+
+客户端新增 `get_workflow_snapshot()`（带进程内缓存）。
+自测新增 `tests/test_snapshot.py`（101 项，不依赖 torch / API Key），含一节交叉一致性验证：
+同一份数据分别走既有 `normalize()` 与新快照，逐节点比对 class_type / 字段集合 / 取值 / meta，
+覆盖 `examples/*.json` 与 S0 的 `tests/fixtures/workflows/*.json`。
+详见 [`docs/snapshot-model.md`](docs/snapshot-model.md)。
+
 ## [1.3.1] - 2026-09-30
 
 ### 文档：确认 RunningHub 不允许安装自定义节点，H3 路线改为「云端出片 + 独立音轨」

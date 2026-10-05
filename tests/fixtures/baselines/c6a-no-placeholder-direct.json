@@ -1,0 +1,41 @@
+{
+  "case_id": "c6a-no-placeholder-direct",
+  "diagnosis": {
+    "negative": "云端结构里 nodeId=7 的 text 不可写入",
+    "positive": "云端结构里 nodeId=6 的 text 不可写入"
+  },
+  "expect_current": {
+    "status": "already_ok",
+    "why": "占位符 0 命中触发兜底：采样器连线源自带 text 字段且文本是字面量，正负两端各命中 1 处（整值覆盖）。"
+  },
+  "hit_stats": {
+    "negative": 1,
+    "positive": 1
+  },
+  "injections": [
+    {
+      "fieldName": "text",
+      "fieldValue": "<<POS_SENTINEL>>",
+      "nodeId": "6"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "<<NEG_SENTINEL>>",
+      "nodeId": "7"
+    }
+  ],
+  "link_field_count": 9,
+  "node_count": 7,
+  "placeholder_hits": {
+    "negative": 0,
+    "positive": 0
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 7
+}

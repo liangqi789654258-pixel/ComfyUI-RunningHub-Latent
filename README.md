@@ -334,12 +334,14 @@ ComfyUI-RunningHub-Latent/
 │   ├── client.py          RunningHub OpenAPI 封装（重试 / 错误映射 / 脱敏）
 │   ├── latent.py          latent 解析，对齐原生 LoadLatent
 │   ├── workflow.py        工作流结构解析 + 提示词全局替换 + 映射校验
+│   ├── snapshot.py        S2 发现层：工作流结构化快照（字段形态 / 执行态 / 指纹 / diff）
 │   ├── cache.py           按参数哈希的本地 latent 缓存
 │   └── settings.py        config.ini / config.json 读取
 ├── web/
 │   └── rh_warning.js      前端扩展：警告时给节点上色、拉高提示词输入框
 ├── tests/
 │   ├── test_core.py       核心逻辑冒烟测试（104 项，不需要 API Key）
+│   ├── test_snapshot.py   发现层快照模型自测（101 项，不需要 torch / API Key）
 │   └── test_package.py    交付物一致性检查（节点定义 vs 示例工作流）
 ├── examples/              4 份示例工作流（极简 / 专业 / 视频 / 二采）
 ├── config.example.ini
@@ -353,6 +355,7 @@ ComfyUI-RunningHub-Latent/
 ```bash
 cd ComfyUI-RunningHub-Latent
 python tests/test_core.py      # 核心逻辑 104 项断言
+python tests/test_snapshot.py  # 发现层快照模型 101 项断言（不依赖 torch）
 python tests/test_package.py   # 节点定义与示例工作流是否一致
 ```
 

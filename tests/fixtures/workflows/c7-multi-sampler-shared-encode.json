@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "case_id": "c7-multi-sampler-shared-encode",
+  "form": "multi-sampler",
+  "description": "多采样器形态：两个采样器串联做二级采样，且共享同一个文本编码节点；二级采样器的 negative 端口接的也是同一个正向条件。代表一类「多段采样 / 精修」的工作流；用于考察重复注入与同槽位被正负两端同时认领的情况。",
+  "tags": [
+    "multi-sampler",
+    "shared-source",
+    "no-placeholder"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":\"a photo of a cat\",\"clip\":[\"1\",1]}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":\"blurry, low quality\",\"clip\":[\"1\",1]}},\"10\":{\"class_type\":\"KSamplerAdvanced\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":1111111111,\"control_after_generate\":\"randomize\",\"steps\":20,\"cfg\":7.0,\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"latent_image\":[\"4\",0],\"start_at_step\":0,\"end_at_step\":20}},\"11\":{\"class_type\":\"KSamplerAdvanced\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":2222222222,\"control_after_generate\":\"randomize\",\"steps\":8,\"cfg\":7.0,\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"6\",0],\"negative\":[\"6\",0],\"latent_image\":[\"10\",0],\"start_at_step\":0,\"end_at_step\":8}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"11\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"11\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "6",
+        "field": "text"
+      }
+    ],
+    "negative": [
+      {
+        "node": "7",
+        "field": "text"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      },
+      {
+        "node": "11",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "人工判断：负向只有 node 7 这一处真正承载负提示词；二级采样器把正向条件同时接到 negative 端口是工作流作者的选择，单值单槽位的注入模型无法表达「同一个编码节点在两个端口上取不同值」。"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "同址重复注入",
+    "why": "两个采样器共享同一编码节点 → 同一 (nodeId 6, fieldName text) 在 nodeInfoList 里出现完全相同的两条，构成同址重复注入（现有去重只处理正负冲突，不处理同一 token 内的重复）；同时 node 11 的 negative 也指向 node 6，正负冲突时 positive 优先认领，负向在第二级采样器上被静默丢弃（有注入、无告警）。"
+  }
+}

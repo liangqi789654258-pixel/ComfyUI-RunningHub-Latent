@@ -1,0 +1,52 @@
+{
+  "case_id": "c4-branch-bypass",
+  "diagnosis": {
+    "negative": "云端结构里 nodeId=7 的 text 不可写入",
+    "positive": "云端结构里 nodeId=6 的 text 不可写入"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "不变量 B",
+    "why": "占位符主路径扫描全部字符串字段时不看节点执行态，两个 bypass 节点（nodeId 40 / 41，直属 \"mode\": 4）上的占位符同样被替换 → 一半注入落到不会执行的节点上，违反不变量 B（可达性：落点必须在实际会被执行的路径上，旁路/未选分支上的节点注入后不会被执行）；同时 steps / cfg / start_at_step / end_at_step 均为 [] 连线，当前实现既不解析也不告警。"
+  },
+  "hit_stats": {
+    "negative": 2,
+    "positive": 2
+  },
+  "injections": [
+    {
+      "fieldName": "text",
+      "fieldValue": "<<POS_SENTINEL>>",
+      "nodeId": "6"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "<<NEG_SENTINEL>>",
+      "nodeId": "7"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "unused branch prompt, <<POS_SENTINEL>>",
+      "nodeId": "40"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "unused branch negative, <<NEG_SENTINEL>>",
+      "nodeId": "41"
+    }
+  ],
+  "link_field_count": 19,
+  "node_count": 15,
+  "placeholder_hits": {
+    "negative": 2,
+    "positive": 2
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 9
+}

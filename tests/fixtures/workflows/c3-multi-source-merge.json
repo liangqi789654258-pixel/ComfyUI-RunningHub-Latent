@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "case_id": "c3-multi-source-merge",
+  "form": "multi-source-merge",
+  "description": "多源汇聚形态：正负两端各自由两个编码节点经条件合并节点汇聚后再进采样器。代表一类「提示词被拆成多路再合并」的工作流；用于考察实现是否具备多源概念。",
+  "tags": [
+    "multi-source",
+    "merge",
+    "partial-placeholder"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词·主体\"},\"inputs\":{\"text\":\"a photo of a cat, {positive}\",\"clip\":[\"1\",1]}},\"21\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词·风格\"},\"inputs\":{\"text\":\"cinematic lighting, {positive}\",\"clip\":[\"1\",1]}},\"20\":{\"class_type\":\"ConditioningCombine\",\"_meta\":{\"title\":\"正向条件合并\"},\"inputs\":{\"conditioning_1\":[\"6\",0],\"conditioning_2\":[\"21\",0]}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词·主体\"},\"inputs\":{\"text\":\"{negative}\",\"clip\":[\"1\",1]}},\"23\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词·附加\"},\"inputs\":{\"text\":\"blurry, low quality\",\"clip\":[\"1\",1]}},\"22\":{\"class_type\":\"ConditioningCombine\",\"_meta\":{\"title\":\"负向条件合并\"},\"inputs\":{\"conditioning_1\":[\"7\",0],\"conditioning_2\":[\"23\",0]}},\"10\":{\"class_type\":\"KSampler\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":20240601,\"control_after_generate\":\"randomize\",\"steps\":20,\"cfg\":7.0,\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"20\",0],\"negative\":[\"22\",0],\"latent_image\":[\"4\",0]}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"10\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"10\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "6",
+        "field": "text"
+      },
+      {
+        "node": "21",
+        "field": "text"
+      }
+    ],
+    "negative": [
+      {
+        "node": "7",
+        "field": "text"
+      },
+      {
+        "node": "23",
+        "field": "text"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "四个编码节点都在执行路径上且都是字面量，理想实现应覆盖全部或明确上报歧义。"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "部分覆盖",
+    "why": "占位符主路径按「扫描全部字符串字段」工作，只替换写了占位符的那一路（正端 2 处命中），未写占位符的负端第二路不会被注入，且实现不会上报「只覆盖了部分源」—— 部分覆盖 既不是全覆盖、也不是拒绝猜测，是静默的第三种状态；一旦工作流没有占位符，兜底路径完全没有多源概念，会整体退回 0 命中。"
+  }
+}

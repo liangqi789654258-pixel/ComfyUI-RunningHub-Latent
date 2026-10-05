@@ -140,6 +140,8 @@ class RunningHubClient:
         # TTL 不宜过长，否则用户改完云端工作流后本地还在用旧结构。
         self._structure_ttl = max(0.0, structure_ttl)
         self._structure_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        # Discovery 层快照缓存（S2），与结构缓存同源但内容更全，互不影响
+        self._snapshot_cache: Dict[str, Tuple[float, Any]] = {}
         # 最近一次原始响应体，供排错时原样展示给用户
         self._last_body: Any = None
 
@@ -402,6 +404,30 @@ class RunningHubClient:
         if structure:
             self._structure_cache[key] = (time.time(), structure)
         return structure
+
+    def get_workflow_snapshot(self, workflow_id: str) -> Optional[Any]:
+        """拉取云端工作流结构并返回 Discovery 层快照（S2）。
+
+        比 `get_workflow_structure` 多三样东西：每字段的 `value_kind`
+        （字面量 / 连线）、节点执行态、以及连线边列表与指纹，供绑定漂移检测使用。
+        拿不到结构时返回空快照（含 warning），不抛异常——由调用方决定是否报错。
+        """
+        from . import snapshot as snapshot_mod
+
+        key = str(workflow_id).strip()
+        if not key:
+            return None
+
+        hit = self._snapshot_cache.get(key)
+        if hit is not None:
+            stamp, value = hit
+            if self._structure_ttl <= 0 or (time.time() - stamp) < self._structure_ttl:
+                return value
+
+        snap = snapshot_mod.build_snapshot(self._fetch_workflow_raw(key), workflow_id=key)
+        if snap.nodes:
+            self._snapshot_cache[key] = (time.time(), snap)
+        return snap
 
     def _fetch_workflow_raw(self, workflow_id: str) -> Any:
         """实际发起请求。该接口在不同版本下 GET/POST 都能通，逐个试。"""

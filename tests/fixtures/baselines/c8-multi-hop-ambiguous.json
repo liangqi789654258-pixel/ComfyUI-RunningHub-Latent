@@ -1,0 +1,30 @@
+{
+  "case_id": "c8-multi-hop-ambiguous",
+  "diagnosis": {
+    "negative": "nodeId=7 的提示词由上游 nodeId=81 提供，而上游有多个文本字段（text_a、text_b），无法判断该注入哪一个",
+    "positive": "nodeId=6 的提示词由上游 nodeId=80 提供，而上游有多个文本字段（text_a、text_b），无法判断该注入哪一个"
+  },
+  "expect_current": {
+    "status": "ambiguous_reject",
+    "why": "上游节点有多个字符串字段且都没有占位符，无法确定唯一落点 → 拒绝猜测，保持 0 命中（这正是期望行为）；诊断信息会说明是哪个上游节点、有哪些候选字段。"
+  },
+  "hit_stats": {
+    "negative": 0,
+    "positive": 0
+  },
+  "injections": [],
+  "link_field_count": 11,
+  "node_count": 9,
+  "placeholder_hits": {
+    "negative": 0,
+    "positive": 0
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 9
+}

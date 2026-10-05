@@ -1,0 +1,34 @@
+{
+  "case_id": "c6b-no-placeholder-passthrough",
+  "diagnosis": {
+    "negative": "连线目标 nodeId=20 没有 text 字段（class_type=ImageToVideoConditioning），无法作为提示词落点",
+    "positive": "连线目标 nodeId=20 没有 text 字段（class_type=ImageToVideoConditioning），无法作为提示词落点"
+  },
+  "expect_current": {
+    "status": "regression_open",
+    "why": "占位符扫描 0 命中；兜底路径在两级采样器上取到的 positive/negative 连线源都是透传节点（无 text 字段），两处均放弃 → 整体 0 命中，且不产生任何诊断以外的提示。"
+  },
+  "hit_stats": {
+    "negative": 0,
+    "positive": 0
+  },
+  "injections": [],
+  "link_field_count": 17,
+  "node_count": 10,
+  "placeholder_hits": {
+    "negative": 0,
+    "positive": 0
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ],
+    [
+      "11",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 12
+}

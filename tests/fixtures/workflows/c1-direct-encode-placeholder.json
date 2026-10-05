@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "case_id": "c1-direct-encode-placeholder",
+  "form": "direct-encode",
+  "description": "正向对照形态：文本编码节点直连采样器（中间没有任何条件变换节点），且编码节点的文本里写了 {positive} / {negative} 占位符。代表一类「作者主动声明了参数协议」的工作流，是现有实现唯一稳定支持的形态。",
+  "tags": [
+    "direct",
+    "with-placeholder",
+    "baseline-ok"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":\"{positive}\",\"clip\":[\"1\",1]}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":\"{negative}\",\"clip\":[\"1\",1]}},\"10\":{\"class_type\":\"KSampler\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":1122334455,\"control_after_generate\":\"randomize\",\"steps\":20,\"cfg\":7.0,\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"latent_image\":[\"4\",0]}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"10\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"10\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "6",
+        "field": "text"
+      }
+    ],
+    "negative": [
+      {
+        "node": "7",
+        "field": "text"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "占位符是作者的显式意图声明，落点唯一且在执行路径上。"
+  },
+  "expect_current": {
+    "status": "already_ok",
+    "why": "占位符主路径扫描全部字符串字段并做子串替换，编码节点直连采样器不含中间节点，因此正负两端各命中 1 处。"
+  }
+}

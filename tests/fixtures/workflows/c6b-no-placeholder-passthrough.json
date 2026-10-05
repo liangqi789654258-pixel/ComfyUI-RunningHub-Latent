@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "case_id": "c6b-no-placeholder-passthrough",
+  "form": "no-placeholder-passthrough",
+  "description": "最坏情况：既没有占位符，条件链上又夹着透传型中间节点，且采样器为二级串联。代表一类「作者没声明协议 + 条件在图中间被重写 + 多段采样」的工作流。",
+  "tags": [
+    "no-placeholder",
+    "passthrough",
+    "multi-sampler",
+    "worst-case"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":832,\"height\":480,\"batch_size\":1}},\"5\":{\"class_type\":\"LoadImage\",\"_meta\":{\"title\":\"参考图\"},\"inputs\":{\"image\":\"example.png\",\"upload\":\"image\"}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":\"a photo of a cat\",\"clip\":[\"1\",1]}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":\"blurry, low quality\",\"clip\":[\"1\",1]}},\"20\":{\"class_type\":\"ImageToVideoConditioning\",\"_meta\":{\"title\":\"视频条件构造（透传）\"},\"inputs\":{\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"vae\":[\"1\",2],\"start_image\":[\"5\",0],\"width\":832,\"height\":480,\"length\":81,\"batch_size\":1}},\"10\":{\"class_type\":\"KSamplerAdvanced\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":4242424242,\"control_after_generate\":\"randomize\",\"steps\":4,\"cfg\":1.0,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"20\",0],\"negative\":[\"20\",1],\"latent_image\":[\"20\",2],\"start_at_step\":0,\"end_at_step\":4}},\"11\":{\"class_type\":\"KSamplerAdvanced\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":8181818181,\"control_after_generate\":\"randomize\",\"steps\":4,\"cfg\":1.0,\"sampler_name\":\"euler\",\"scheduler\":\"simple\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"20\",0],\"negative\":[\"20\",1],\"latent_image\":[\"10\",0],\"start_at_step\":4,\"end_at_step\":8}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"11\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"11\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "6",
+        "field": "text"
+      }
+    ],
+    "negative": [
+      {
+        "node": "7",
+        "field": "text"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      },
+      {
+        "node": "11",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "两个采样器共享同一条件源，落点仍是上游编码节点，需要穿越透传节点才能到达。"
+  },
+  "expect_current": {
+    "status": "regression_open",
+    "why": "占位符扫描 0 命中；兜底路径在两级采样器上取到的 positive/negative 连线源都是透传节点（无 text 字段），两处均放弃 → 整体 0 命中，且不产生任何诊断以外的提示。"
+  }
+}

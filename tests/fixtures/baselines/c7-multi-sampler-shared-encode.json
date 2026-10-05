@@ -1,0 +1,51 @@
+{
+  "case_id": "c7-multi-sampler-shared-encode",
+  "diagnosis": {
+    "negative": "云端结构里 nodeId=7 的 text 不可写入",
+    "positive": "云端结构里 nodeId=6 的 text 不可写入"
+  },
+  "expect_current": {
+    "status": "injected_suspect",
+    "violation": "同址重复注入",
+    "why": "两个采样器共享同一编码节点 → 同一 (nodeId 6, fieldName text) 在 nodeInfoList 里出现完全相同的两条，构成同址重复注入（现有去重只处理正负冲突，不处理同一 token 内的重复）；同时 node 11 的 negative 也指向 node 6，正负冲突时 positive 优先认领，负向在第二级采样器上被静默丢弃（有注入、无告警）。"
+  },
+  "hit_stats": {
+    "negative": 1,
+    "positive": 2
+  },
+  "injections": [
+    {
+      "fieldName": "text",
+      "fieldValue": "<<POS_SENTINEL>>",
+      "nodeId": "6"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "<<POS_SENTINEL>>",
+      "nodeId": "6"
+    },
+    {
+      "fieldName": "text",
+      "fieldValue": "<<NEG_SENTINEL>>",
+      "nodeId": "7"
+    }
+  ],
+  "link_field_count": 13,
+  "node_count": 8,
+  "placeholder_hits": {
+    "negative": 0,
+    "positive": 0
+  },
+  "schema_version": 1,
+  "seed_targets": [
+    [
+      "10",
+      "noise_seed"
+    ],
+    [
+      "11",
+      "noise_seed"
+    ]
+  ],
+  "string_field_count": 10
+}

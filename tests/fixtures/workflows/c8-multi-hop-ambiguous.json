@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "case_id": "c8-multi-hop-ambiguous",
+  "form": "multi-hop-ambiguous",
+  "description": "歧义形态：文本处理（拼接）节点位于最上游，自身有多个字符串字段，且都没有占位符。代表一类「提示词由多个片段拼出来」的工作流；结构上无法唯一判定该写哪一个片段。",
+  "tags": [
+    "ambiguous",
+    "multi-candidate",
+    "no-placeholder",
+    "upstream-hop"
+  ],
+  "api_response": {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "prompt": "{\"1\":{\"class_type\":\"CheckpointLoaderSimple\",\"_meta\":{\"title\":\"Checkpoint加载器\"},\"inputs\":{\"ckpt_name\":\"sd_xl_base_1.0.safetensors\"}},\"4\":{\"class_type\":\"EmptyLatentImage\",\"_meta\":{\"title\":\"空Latent\"},\"inputs\":{\"width\":1024,\"height\":1024,\"batch_size\":1}},\"6\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"正面提示词\"},\"inputs\":{\"text\":[\"80\",0],\"clip\":[\"1\",1]}},\"80\":{\"class_type\":\"StringConcat\",\"_meta\":{\"title\":\"文本拼接·正\"},\"inputs\":{\"text_a\":\"masterpiece, best quality\",\"text_b\":\"a photo of a cat\"}},\"7\":{\"class_type\":\"CLIPTextEncode\",\"_meta\":{\"title\":\"负面提示词\"},\"inputs\":{\"text\":[\"81\",0],\"clip\":[\"1\",1]}},\"81\":{\"class_type\":\"StringConcat\",\"_meta\":{\"title\":\"文本拼接·负\"},\"inputs\":{\"text_a\":\"bad anatomy, \",\"text_b\":\"blurry\"}},\"10\":{\"class_type\":\"KSampler\",\"_meta\":{\"title\":\"采样器\"},\"inputs\":{\"noise_seed\":6060606060,\"control_after_generate\":\"randomize\",\"steps\":20,\"cfg\":7.0,\"sampler_name\":\"euler\",\"scheduler\":\"normal\",\"denoise\":1.0,\"model\":[\"1\",0],\"positive\":[\"6\",0],\"negative\":[\"7\",0],\"latent_image\":[\"4\",0]}},\"8\":{\"class_type\":\"VAEDecode\",\"_meta\":{\"title\":\"VAE解码\"},\"inputs\":{\"samples\":[\"10\",0],\"vae\":[\"1\",2]}},\"9\":{\"class_type\":\"SaveLatent\",\"_meta\":{\"title\":\"保存Latent\"},\"inputs\":{\"samples\":[\"10\",0],\"filename_prefix\":\"rh_latent\"}}}"
+    }
+  },
+  "truth": {
+    "positive": [
+      {
+        "node": "80",
+        "field": "text_a"
+      },
+      {
+        "node": "80",
+        "field": "text_b"
+      }
+    ],
+    "negative": [
+      {
+        "node": "81",
+        "field": "text_a"
+      },
+      {
+        "node": "81",
+        "field": "text_b"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "field": "noise_seed"
+      }
+    ],
+    "note": "这里列出的是候选而非结论：人工也无法只凭结构断定该注入哪一个片段，正确行为是拒绝猜测并给出候选清单与理由（由上层裁决或交给人确认）。"
+  },
+  "expect_current": {
+    "status": "ambiguous_reject",
+    "why": "上游节点有多个字符串字段且都没有占位符，无法确定唯一落点 → 拒绝猜测，保持 0 命中（这正是期望行为）；诊断信息会说明是哪个上游节点、有哪些候选字段。"
+  }
+}
