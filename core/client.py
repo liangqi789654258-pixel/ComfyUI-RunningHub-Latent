@@ -42,6 +42,9 @@ CODE_SUCCESS = 0
 CODE_RUNNING = 804
 CODE_QUEUED = 813
 CODE_FAILED = 805
+# 参数注入不合法（APIKEY_INVALID_NODE_INFO）：nodeInfoList 整包被拒。
+# 这个码必须单独认得出来——它是唯一能在提交前精确定位到「第几条映射错了」的信号。
+CODE_PARAM_INVALID = 803
 
 _TERMINAL_CODES = (CODE_SUCCESS, CODE_FAILED)
 
@@ -69,7 +72,16 @@ _ERROR_HINTS: Dict[int, str] = {
 
 
 class RunningHubError(RuntimeError):
-    """RunningHub 相关异常的基类。所有消息面向终端用户，必须是中文。"""
+    """RunningHub 相关异常的基类。所有消息面向终端用户，必须是中文。
+
+    `code` 是平台返回的业务码（拿不到时为 None）。带上它是为了让上层能
+    针对特定错误码做精确定位——最典型的就是 803：平台只说「整包不合法」，
+    而上层手里有工作流结构，可以逐条指出是哪一条映射错了。
+    """
+
+    def __init__(self, message: str, code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class TaskFailedError(RunningHubError):
@@ -199,7 +211,7 @@ class RunningHubClient:
                 )
 
             hint = _ERROR_HINTS.get(code, f"服务端返回码 {code}：{msg}")
-            raise RunningHubError(f"RunningHub 调用失败 —— {hint}")
+            raise RunningHubError(f"RunningHub 调用失败 —— {hint}", code=code)
 
         raise RunningHubError(f"重试 {self.max_retries} 次后仍失败：{self._mask(last_exc)}")
 
@@ -299,7 +311,7 @@ class RunningHubClient:
             return {"state": "success", "outputs": data}
 
         hint = _ERROR_HINTS.get(code, self._mask(body.get("msg", "")))
-        raise RunningHubError(f"查询任务 {task_id} 失败 —— {hint}")
+        raise RunningHubError(f"查询任务 {task_id} 失败 —— {hint}", code=code)
 
     @staticmethod
     def _status_of(data: Any, body: Dict[str, Any]) -> str:
@@ -381,21 +393,28 @@ class RunningHubClient:
 
             time.sleep(min(poll_interval, max(0.5, timeout - elapsed)))
 
-    def get_workflow_structure(self, workflow_id: str) -> Dict[str, Dict[str, Any]]:
+    def get_workflow_structure(
+        self, workflow_id: str, force: bool = False
+    ) -> Dict[str, Dict[str, Any]]:
         """拉取云端工作流结构，归一化成 {nodeId: {class_type, inputs}}。
 
-        这是极简版「零配置」依赖的能力：拿到结构才能自动定位提示词文本节点
-        与采样器 seed 字段。拿不到时返回空 dict，由调用方决定如何降级。
+        拿到结构才能定位提示词文本节点与采样器 seed 字段。拿不到时返回空 dict，
+        由调用方决定如何降级。
+
+        `force=True` 跳过进程内缓存重新拉取。用于「本地缓存可能是旧的、而结论
+        又很关键」的场合——目前只有 803 逐条诊断用（平台已拒绝、本次不计费，
+        多拉一次结构换一个可信结论很划算）。
         """
         key = str(workflow_id).strip()
         if not key:
             return {}
 
-        hit = self._structure_cache.get(key)
-        if hit is not None:
-            stamp, value = hit
-            if self._structure_ttl <= 0 or (time.time() - stamp) < self._structure_ttl:
-                return value
+        if not force:
+            hit = self._structure_cache.get(key)
+            if hit is not None:
+                stamp, value = hit
+                if self._structure_ttl <= 0 or (time.time() - stamp) < self._structure_ttl:
+                    return value
 
         raw = self._fetch_workflow_raw(key)
         from . import workflow as workflow_mod
@@ -480,4 +499,5 @@ __all__ = [
     "TaskFailedError",
     "TaskTimeoutError",
     "DEFAULT_BASE_URL",
+    "CODE_PARAM_INVALID",
 ]

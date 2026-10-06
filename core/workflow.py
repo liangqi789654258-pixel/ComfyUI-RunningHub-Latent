@@ -17,6 +17,11 @@
    替换是**子串替换**而非整值替换，所以云端写成
    `masterpiece, {positive}, best quality` 也能正确保留前后缀。
 
+   注意这里**不做任何拓扑猜测**：曾经有一套「沿采样器 positive/negative 连线
+   向上游回溯找文本字段」的兜底，已推倒——图像大小设置和提示词应用每条工作流
+   都不一样，猜出来的落点一旦错了就是静默失效。没有占位符 = 没有自动落点，
+   由调用方报错并指引用户手写映射。
+
 2. **种子：优先认采样器类型，找不到再认字段名**
    先找 class_type 里带 Sampler 的节点；一个都没有时，退化为「任何带 seed
    字段的节点」。两种都找不到就在 report 里明说，而不是悄悄跳过。
@@ -38,7 +43,8 @@ _TOKEN_PATTERNS = {
 _SEED_FIELDS = ("seed", "noise_seed", "rand_seed")
 _SAMPLER_HINTS = ("sampler",)
 
-# 沿上游回溯时，「文本类字段」的候选优先级（各插件包命名不统一）
+# 「看起来承载提示词」的字段名候选（各插件包命名不统一）。
+# 只用于给用户推荐落点、以及生成探查模板，**不用于自动决定落点**。
 _TEXT_FIELD_ORDER = (
     "text", "string", "value", "prompt", "str",
     "text_a", "text_b", "text_g", "text_l", "wildcard",
@@ -182,224 +188,132 @@ def _node_sort_key(node_id: str) -> Tuple[int, str]:
         return (1, str(node_id))
 
 
-def _upstream_text_source(
-    structure: Dict[str, Dict[str, Any]], node_id: str, field: str = "text"
-) -> Optional[Tuple[str, str]]:
-    """从 (nodeId, field) 沿连线向上游走，找到**真正能写入**的字符串字段。
+def _is_link(value: Any) -> bool:
+    """判断字段值是否为连线引用（形如 [源节点Id, 输出槽序号]）。"""
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], (str, int))
+    )
 
-    为什么要往上游走：ComfyUI 里一个 widget 一旦被上游连线接管，它在工作流
-    JSON 里就从「字符串」变成「连线引用 [源节点, 0]」。此时往这个节点注入
-    text 是无效的——运行期值会被上游覆盖，而且不报错，属于最坏的静默失效。
-    典型场景就是用户在文本节点前面接了字符串拼接 / 通配符 / 提示词处理节点。
 
-    只返回**能唯一确定**的落点：
-      * 字段值本身是字符串 -> 就是它（最普通的情况）；
-      * 上游节点里有字段值含 {positive}/{negative} 占位符 -> 认这个；
-      * 上游节点只有一个字符串字段 -> 用这个；
-      * 上游有多个字符串字段且都没有占位符 -> 返回 None，交给调用方报错，
-        绝不替用户猜（猜错同样是静默失效，只是更隐蔽）。
+def _node_label(structure: Dict[str, Dict[str, Any]], node_id: str) -> str:
+    """把节点渲染成「能认出来是哪个」的标签。
+
+    带上用户在画布上起的自定标题（_meta.title，normalize 已保留）——
+    「正面提示词」「Positive Prompt」这类标题是判断落点最直接的线索，
+    比只看 class_type 强得多。只用于呈现，不用于任何自动判断。
     """
-    seen = set()
-    cur_id, cur_field = str(node_id), field
-
-    for _ in range(8):  # 限深，防止环形连线死循环
-        key = (cur_id, cur_field)
-        if key in seen:
-            return None
-        seen.add(key)
-
-        meta = structure.get(cur_id)
-        if not meta:
-            return None
-        inputs = meta.get("inputs") or {}
-        if not isinstance(inputs, dict):
-            return None
-        value = inputs.get(cur_field)
-
-        if isinstance(value, str):
-            return (cur_id, cur_field)
-
-        if isinstance(value, list) and len(value) >= 1:
-            src_id = str(value[0])
-            src_meta = structure.get(src_id)
-            if not src_meta:
-                return None  # 上游节点不在返回结构里，无从下手
-            src_inputs = src_meta.get("inputs") or {}
-            if not isinstance(src_inputs, dict):
-                return None
-
-            str_fields = [f for f, v in src_inputs.items() if isinstance(v, str)]
-            # 占位符最可靠：用户在哪个字段写了标记就往哪注入
-            for candidate in str_fields:
-                text = str(src_inputs[candidate])
-                if _TOKEN_PATTERNS["positive"].search(text) or _TOKEN_PATTERNS[
-                    "negative"
-                ].search(text):
-                    return (src_id, candidate)
-            if len(str_fields) == 1:
-                return (src_id, str_fields[0])
-            if not str_fields:
-                # 上游仍然是纯连线，继续往上溯：先沿用同名字段，
-                # 再按常见文本字段名挑一个（value / string / prompt ...），
-                # 最后退化为「任一连线字段」。
-                nxt: Optional[str] = None
-                if cur_field in src_inputs:
-                    nxt = cur_field
-                else:
-                    for name in _TEXT_FIELD_ORDER:
-                        if name in src_inputs:
-                            nxt = name
-                            break
-                if nxt is None:
-                    for name, item in src_inputs.items():
-                        if isinstance(item, list):
-                            nxt = name
-                            break
-                if nxt is None:
-                    return None
-                cur_id, cur_field = src_id, nxt
-                continue
-            return None  # 多个候选且无占位符，不敢猜
-
-        return None  # 字段既不是字符串也不是连线（缺字段等）
-
-    return None
+    meta = structure.get(str(node_id)) or {}
+    class_type = str(meta.get("class_type") or "?")
+    title = str((meta.get("meta") or {}).get("title") or "")
+    label = f"nodeId={node_id} [{class_type}]"
+    if title and title != class_type:
+        label += f" 「{title}」"
+    return label
 
 
-def _linked_prompt_targets(
+def _literal_text_slots(
     structure: Dict[str, Dict[str, Any]]
-) -> Dict[str, List[Tuple[str, str]]]:
-    """跟随采样器的 positive / negative 连线，找到提示词文本的**可写入落点**。
+) -> List[Tuple[str, str]]:
+    """列出「可能承载提示词」的**字面量**字段，供诊断给用户推荐落点。
 
-    这是占位符扫描的兜底路径：有些工作流的 getJsonApiFormat 返回里
-    看不到文本节点的 widget 值（比如文本节点没被注册成 API 参数），
-    占位符扫描永远是 0 命中。但只要结构里保留了采样器的连线关系，
-    就能确定性地找到「哪个节点承载正提示、哪个承载负提示」。
-
-    落点会继续沿上游连线回溯（见 _upstream_text_source），因此
-    「文本节点前面接了字符串拼接 / 通配符等处理节点」也能正确注入。
-
-    返回 {"positive": [(nodeId, fieldName)...], "negative": [...]}。
-    同一个 (nodeId, fieldName) 不允许同时归属正、负两个 token。
+    优先取字段名像文本的（text / value / string …），一个都没有时才退回
+    「任意字符串字段」。只用于**建议**，不用于自动决定落点。
     """
-    targets: Dict[str, List[Tuple[str, str]]] = {"positive": [], "negative": []}
+    preferred: List[Tuple[str, str]] = []
+    fallback: List[Tuple[str, str]] = []
+    for node_id, field, _value in iter_string_fields(structure):
+        if str(field).lower() in _TEXT_FIELD_ORDER:
+            preferred.append((node_id, field))
+        else:
+            fallback.append((node_id, field))
+    if preferred:
+        # 字段名越像「提示词」排越前：text 优先于 text_a / wildcard。
+        # 只是排序，不筛掉任何一个候选——筛就是替用户猜，不筛才是把信息摆全。
+        order = {name: i for i, name in enumerate(_TEXT_FIELD_ORDER)}
+        preferred.sort(
+            key=lambda nf: (order.get(str(nf[1]).lower(), 99), _node_sort_key(nf[0]))
+        )
+        return preferred
+    return fallback
 
-    for node_id, meta in sorted(structure.items(), key=lambda kv: _node_sort_key(kv[0])):
-        class_type = str(meta.get("class_type", "")).lower()
-        if "sampler" not in class_type:
-            continue
-        inputs = meta.get("inputs") or {}
-        if not isinstance(inputs, dict):
-            continue
-        for token in ("positive", "negative"):
-            link = inputs.get(token)
-            # 连线引用形如 [源节点Id, 输出槽序号]
-            if not (isinstance(link, list) and len(link) >= 1):
-                continue
-            src_id = str(link[0])
-            src_meta = structure.get(src_id)
-            if not src_meta:
-                continue  # 连线源不在结构里（部分工作流返回会缺节点），兜底放弃
-            src_inputs = src_meta.get("inputs") or {}
-            if not isinstance(src_inputs, dict) or "text" not in src_inputs:
-                continue  # 连线源没有 text 字段，不是提示词编码节点
 
-            # 该节点的 text 可能被上游连线接管 -> 继续往上游找真正能写的地方
-            resolved = _upstream_text_source(structure, src_id, "text")
-            if resolved is None:
-                continue  # 无法确定落点：宁可报错，也不要打一发无效的注入
-            targets[token].append(resolved)
-
-    # 解决冲突：同一个 (nodeId, field) 只归一个 token，positive 优先认领
-    claimed: Dict[Tuple[str, str], str] = {}
-    for token in ("positive", "negative"):
-        unique: List[Tuple[str, str]] = []
-        for slot in targets[token]:
-            owner = claimed.get(slot)
-            if owner is not None and owner != token:
-                continue
-            if owner is None:
-                claimed[slot] = token
-            unique.append(slot)
-        targets[token] = unique
-    return targets
+def _multi_field_note(slots: List[Tuple[str, str]]) -> str:
+    """同一节点有多个文本字段时，明确告诉用户「机器无法判断该注入哪一个」。"""
+    grouped: Dict[str, List[str]] = {}
+    for node_id, field in slots:
+        grouped.setdefault(node_id, []).append(field)
+    for node_id in sorted(grouped, key=_node_sort_key):
+        fields = grouped[node_id]
+        if len(fields) > 1:
+            return (
+                f"（注意：nodeId={node_id} 有多个文本字段（{'、'.join(sorted(fields))}），"
+                "无法判断该注入哪一个，请按语义自行选择。）"
+            )
+    return ""
 
 
 def prompt_link_diagnosis(structure: Dict[str, Dict[str, Any]], token: str) -> str:
-    """解释某个提示词 token 为什么找不到可注入的落点，返回中文原因。
+    """说明「为什么没有自动落点」，并给出可直接照抄的手写映射修法。
 
-    只在「确实没能注入」时调用，用来生成精确警告——泛泛地说
-    「请检查云端配置」对用户没有帮助，必须落到具体节点上。
+    契约变更（原「自动匹配提示词」已推倒）：本插件不再沿连线猜测提示词的落点。
+    原因是图像大小设置和提示词的接法每条工作流都不一样，猜出来的落点一旦错了
+    就是**静默失效**——用户以为生效了，其实根本没送上去，比报错更糟。
+
+    因此这里不再解释「猜测为什么失败」，而是回答用户真正要问的三件事：
+    云端结构里有没有可写的地方、该往哪写、怎么写。返回字符串（调用方会把它
+    拼进 warning / 报错文案），签名与返回类型保持不变。
     """
     if not structure:
-        return "云端工作流结构读取失败（getJsonApiFormat 没有返回可用节点）"
+        return (
+            "云端工作流结构读取失败（getJsonApiFormat 没有返回可用节点），"
+            "无从推荐落点。请确认工作流 ID 正确且已保存，"
+            "再用「RH 工作流参数探查」拉一次清单后手写参数映射。"
+        )
 
-    for node_id, meta in sorted(structure.items(), key=lambda kv: _node_sort_key(kv[0])):
-        class_type = str(meta.get("class_type", "")).lower()
-        if "sampler" not in class_type:
-            continue
-        inputs = meta.get("inputs") or {}
-        link = inputs.get(token)
-        if not (isinstance(link, list) and len(link) >= 1):
-            continue
+    slots = _literal_text_slots(structure)
+    if not slots:
+        return (
+            f"云端结构共读到 {len(structure)} 个节点，但没有可写入的字面量文本字段"
+            "（文本字段都已被上游连线接管）。本节点不做拓扑猜测，"
+            "请在参数映射里手工指定 nodeId / fieldName。"
+        )
 
-        src_id = str(link[0])
-        src_meta = structure.get(src_id)
-        if src_meta is None:
-            return (
-                f"采样器 nodeId={node_id} 的 {token} 连线指向 nodeId={src_id}，"
-                "但该节点不在云端返回的结构里（该节点未注册为 API 参数时常见）"
-            )
-        src_inputs = src_meta.get("inputs") or {}
-        if "text" not in src_inputs:
-            return (
-                f"连线目标 nodeId={src_id} 没有 text 字段（class_type="
-                f"{src_meta.get('class_type', '?')}），无法作为提示词落点"
-            )
-        if isinstance(src_inputs.get("text"), list) and src_inputs["text"]:
-            upstream_id = str(src_inputs["text"][0])
-            upstream_inputs = (structure.get(upstream_id) or {}).get("inputs") or {}
-            str_fields = [f for f, v in upstream_inputs.items() if isinstance(v, str)]
-            if len(str_fields) > 1:
-                return (
-                    f"nodeId={src_id} 的提示词由上游 nodeId={upstream_id} 提供，"
-                    f"而上游有多个文本字段（{'、'.join(sorted(str_fields))}），"
-                    "无法判断该注入哪一个"
-                )
-            return (
-                f"nodeId={src_id} 的 text 由上游连线（nodeId={upstream_id}）接管，"
-                "本插件无法就地覆盖，且上游也找不到唯一的文本字段"
-            )
-        return f"云端结构里 nodeId={src_id} 的 text 不可写入"
-
+    shown = "、".join(f"{_node_label(structure, n)}.{f}" for n, f in slots[:6])
+    tail = "" if len(slots) <= 6 else f"（另有 {len(slots) - 6} 个未列出）"
     return (
-        "云端返回的结构里没有采样器的 positive/negative 连线，"
-        "无法自动定位提示词落点"
+        f"云端结构共读到 {len(structure)} 个节点，但没有一处 {{{token}}} 占位符，"
+        f"本节点不会沿连线猜测落点。请在参数映射里手工指定：{shown}{tail}。"
+        f"{_multi_field_note(slots)}"
+        "（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断"
+        "哪一个是提示词落点，选错会覆盖不该覆盖的内容，"
+        "例如被多个分支共用的 lora 触发词节点。）"
+        f'复制后把 nodeId 换成你自己的：{{"nodeId": "<ID>", "fieldName": "text", '
+        f'"fieldValue": "{{{token}}}"}}；'
+        "也可以直接在云端文本节点的文本框里写上 "
+        f"{{{token}}} 标记，本节点会自动替换。"
     )
 
 
 def build_prompt_injections(
     structure: Dict[str, Dict[str, Any]], positive: str, negative: str
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """按占位符生成提示词注入项。
+    """按占位符生成提示词注入项（**只认占位符，不做任何拓扑猜测**）。
 
     返回 (注入列表, {"positive": 命中次数, "negative": 命中次数})。
 
     调用方必须检查命中次数：为 0 意味着云端工作流里根本没有占位符，
-    用户填的提示词不会生效——这种情况必须显式警告，绝不能静默跳过。
+    用户填的提示词不会生效——这种情况必须由调用方**报错**，绝不能静默跳过。
 
-    两级查找：
-      1. 占位符扫描（主路径）：云端文本里写了 {positive}/{negative} 就替换；
-      2. 连线跟随（兜底）：占位符没命中但用户填了提示词时，沿采样器的
-         positive/negative 连线找到编码节点，再继续向上游回溯到真正可写的
-         字符串字段后整体覆盖（能处理「文本节点前面接了字符串处理节点」）。
-         兜底命中同样计入命中次数，调用方不会误报「未生效」；
-         无法确定唯一落点时**不产生注入**，保持 0 命中以便如实警告。
+    契约：{positive} / {negative} 是工作流作者写进云端文本里的**显式声明**，
+    本函数只做子串替换。曾经存在的「沿采样器连线兜底回溯」已被推倒——
+    每条工作流的提示词接法都不一样（有的接字符串拼接、有的接通配符、
+    有的接透传节点），按拓扑猜出来的落点错了就是静默失效。
     """
     injections: List[Dict[str, Any]] = []
     stats = {"positive": 0, "negative": 0}
     values = {"positive": positive or "", "negative": negative or ""}
-    supplied = {token: bool((values[token]).strip()) for token in values}
 
     for node_id, field, text in iter_string_fields(structure):
         new_text = text
@@ -412,18 +326,6 @@ def build_prompt_injections(
             injections.append(
                 {"nodeId": node_id, "fieldName": field, "fieldValue": new_text}
             )
-
-    # 兜底：占位符没命中但用户填了提示词 -> 沿连线找注入点
-    if any(supplied[t] and stats[t] == 0 for t in supplied):
-        targets = _linked_prompt_targets(structure)
-        for token in ("positive", "negative"):
-            if not (supplied[token] and stats[token] == 0):
-                continue
-            for node_id, field in targets[token]:
-                injections.append(
-                    {"nodeId": node_id, "fieldName": field, "fieldValue": values[token]}
-                )
-                stats[token] += 1
 
     return injections, stats
 
@@ -467,6 +369,48 @@ def find_seed_targets(structure: Dict[str, Dict[str, Any]]) -> List[Tuple[str, s
     return sampler_slots or fallback_slots
 
 
+def _diagnose_injection(
+    structure: Dict[str, Dict[str, Any]], item: Dict[str, Any]
+) -> Optional[str]:
+    """校验单条映射，返回中文问题；合法则返回 None。"""
+    node_id = str(item.get("nodeId", ""))
+    field = str(item.get("fieldName", ""))
+    meta = structure.get(node_id)
+    if meta is None:
+        return (
+            f"nodeId「{node_id}」在云端工作流里不存在"
+            "（换工作流后最容易踩这个坑，可用「RH 工作流参数探查」重新拉清单）"
+        )
+    inputs = meta.get("inputs") or {}
+    if not isinstance(inputs, dict) or field not in inputs:
+        available = ", ".join(sorted(inputs.keys())) if inputs else "（该节点无可注入字段）"
+        return f"nodeId「{node_id}」没有字段「{field}」，该节点可用字段：{available}"
+    # 不变量 A：不得向连线字段注入。字段值是 [源节点, 槽位] 说明该输入已被
+    # 上游连线接管，平台不建议修改，写进去不报错也不会生效——最坏的静默失效。
+    if _is_link(inputs.get(field)):
+        src = str(inputs[field][0]) if inputs[field] else "?"
+        return (
+            f"nodeId「{node_id}」的字段「{field}」已被上游连线接管"
+            f"（当前值是连线引用，来源 nodeId={src}），"
+            "平台不建议修改连线字段，注入不会生效。"
+        )
+    return None
+
+
+def diagnose_injections(
+    structure: Dict[str, Dict[str, Any]], injections: List[Dict[str, Any]]
+) -> List[Optional[str]]:
+    """逐条校验，返回与 `injections` **一一对应**的问题列表（None = 该条合法）。
+
+    一一对应是给「803 逐条定位」用的：平台整包拒绝时，调用方需要知道
+    **第几条**错了，而不是拿到一堆无从下手的字符串。
+    结构不可得时全部返回 None——无法校验就不下结论。
+    """
+    if not structure:
+        return [None] * len(injections)
+    return [_diagnose_injection(structure, item) for item in injections]
+
+
 def validate_injections(
     structure: Dict[str, Dict[str, Any]], injections: List[Dict[str, Any]]
 ) -> List[str]:
@@ -476,26 +420,7 @@ def validate_injections(
     """
     if not structure:
         return []
-
-    problems: List[str] = []
-    for item in injections:
-        node_id = str(item.get("nodeId", ""))
-        field = str(item.get("fieldName", ""))
-        meta = structure.get(node_id)
-        if meta is None:
-            problems.append(
-                f"nodeId「{node_id}」在云端工作流里不存在"
-                "（换工作流后最容易踩这个坑，可用「RH 工作流参数探查」重新拉清单）"
-            )
-            continue
-        inputs = meta.get("inputs") or {}
-        if not isinstance(inputs, dict) or field not in inputs:
-            available = ", ".join(sorted(inputs.keys())) if inputs else "（该节点无可注入字段）"
-            problems.append(
-                f"nodeId「{node_id}」没有字段「{field}」，"
-                f"该节点可用字段：{available}"
-            )
-    return problems
+    return [p for p in diagnose_injections(structure, injections) if p is not None]
 
 
 def describe(structure: Dict[str, Dict[str, Any]], limit: int = 60) -> str:
@@ -507,11 +432,7 @@ def describe(structure: Dict[str, Dict[str, Any]], limit: int = 60) -> str:
         if not isinstance(inputs, dict):
             inputs = {}
         # 连线引用形如 [nodeId, outputIndex]，不是可注入的 widget，剔除
-        fields = {
-            k: v
-            for k, v in inputs.items()
-            if not (isinstance(v, list) and len(v) == 2 and isinstance(v[0], (str, int)))
-        }
+        fields = {k: v for k, v in inputs.items() if not _is_link(v)}
         if not fields:
             continue
         # 用户自定义的节点标题（_meta.title）比 class_type 更能说明这个节点是干什么的，
@@ -530,13 +451,64 @@ def describe(structure: Dict[str, Dict[str, Any]], limit: int = 60) -> str:
     return "\n".join(lines)
 
 
+def mapping_templates(
+    structure: Dict[str, Dict[str, Any]], value_limit: int = 40
+) -> str:
+    """为每个节点的**字面量字段**生成可直接复制的参数映射片段。
+
+    为什么要再出一份、而不是只给 describe 的字段清单：用户抄 nodeId / fieldName
+    再手打 JSON 的过程本身就是出错来源（引号、逗号、字段名打错 → 平台 803 整包拒绝）。
+    这里直接给出能粘进映射框的完整片段，用户只改 fieldValue 即可。
+
+    连线字段（`[]` 形态）**不给模板**：平台不建议修改连线字段，给了就等于
+    诱导用户写出必然失效的映射。因此输出里必须把两者明确区分开。
+    """
+    import json
+
+    lines: List[str] = []
+    for node_id, meta in sorted(structure.items(), key=lambda kv: _node_sort_key(kv[0])):
+        inputs = meta.get("inputs")
+        if not isinstance(inputs, dict) or not inputs:
+            continue
+        literal = {k: v for k, v in inputs.items() if not _is_link(v)}
+        linked = [k for k, v in inputs.items() if _is_link(v)]
+        if not literal and not linked:
+            continue
+
+        class_type = meta.get("class_type") or "?"
+        node_meta = meta.get("meta")
+        title = str(node_meta.get("title") or "") if isinstance(node_meta, dict) else ""
+        if title and title != class_type:
+            lines.append(f"● nodeId={node_id}  [{class_type}]  「{title}」")
+        else:
+            lines.append(f"● nodeId={node_id}  [{class_type}]")
+
+        for name in sorted(literal.keys()):
+            value: Any = literal[name]
+            if isinstance(value, str) and len(value) > value_limit:
+                value = value[:value_limit] + "…"
+            snippet = json.dumps(
+                {"nodeId": node_id, "fieldName": name, "fieldValue": value},
+                ensure_ascii=False,
+            )
+            lines.append(f"    {snippet}")
+        for name in sorted(linked):
+            src = str(inputs[name][0]) if inputs[name] else "?"
+            lines.append(
+                f"    × {name} 是连线字段（由 nodeId={src} 提供）—— 不能注入，不提供模板"
+            )
+    return "\n".join(lines)
+
+
 __all__ = [
     "normalize",
     "build_prompt_injections",
     "find_seed_targets",
     "validate_injections",
+    "diagnose_injections",
     "iter_string_fields",
     "describe",
+    "mapping_templates",
     "prompt_link_diagnosis",
     "placeholder_hits",
 ]

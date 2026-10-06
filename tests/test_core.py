@@ -480,6 +480,31 @@ check("合法映射无告警",
 check("结构不可得时不误报",
       wf_mod.validate_injections({}, [{"nodeId": "3", "fieldName": "seed"}]) == [])
 
+# 不变量 A：连线字段不得注入（字段值是 [源节点, 槽位] 说明已被上游接管）
+struct_linked = {
+    "3": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["6", 0]}},
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "{positive}"}},
+}
+probs3 = wf_mod.validate_injections(struct_linked, [{"nodeId": "3", "fieldName": "positive"}])
+check("连线字段被拒绝（不变量 A）", len(probs3) == 1 and "连线" in probs3[0], str(probs3))
+check("连线字段报错里点名来源节点", "nodeId=6" in probs3[0], str(probs3))
+check("同一节点的字面量字段仍然合法",
+      wf_mod.validate_injections(struct_linked, [{"nodeId": "6", "fieldName": "text"}]) == [])
+
+# 逐条诊断：与 injections 一一对应（803 逐条定位依赖这个对齐关系）
+diags = wf_mod.diagnose_injections(
+    struct_linked,
+    [
+        {"nodeId": "6", "fieldName": "text"},
+        {"nodeId": "999", "fieldName": "seed"},
+        {"nodeId": "3", "fieldName": "positive"},
+    ],
+)
+check("diagnose_injections 与入参一一对应", len(diags) == 3, str(diags))
+check("合法的那一格是 None", diags[0] is None, str(diags[0]))
+check("不合法的两格分别给出原因",
+      diags[1] is not None and diags[2] is not None and diags[1] != diags[2], str(diags))
+
 print("\n=== 23. 注入项合并：手工映射优先于自动定位 ===")
 auto = [{"nodeId": "6", "fieldName": "text", "fieldValue": "自动"}]
 manual = [{"nodeId": "6", "fieldName": "text", "fieldValue": "手工"}]
@@ -521,12 +546,24 @@ it = Simple.INPUT_TYPES()
 req = it["required"]
 check("极简版含字段 api_key", "api_key" in req)
 check("极简版含字段 workflow_id", "workflow_id" in req)
+# 契约变更（用户已拍板）：极简版多出 node_overrides 一个框。
+# 「图像大小设置和提示词应用每条工作流都不一样」，靠节点猜必然猜错；
+# 想改云端任何参数都必须手写映射。原先「只有两个输入框」的断言因此反转。
 check(
-    "极简版只有这两个输入框（多一个都算违背零配置定位）",
-    set(req.keys()) == {"api_key", "workflow_id"},
+    "极简版只有这三个输入框（api_key / workflow_id / node_overrides）",
+    set(req.keys()) == {"api_key", "workflow_id", "node_overrides"},
     f"实际字段：{sorted(req.keys())}",
 )
-check("极简版不含 node_overrides", "node_overrides" not in req)
+check("极简版含 node_overrides（纯手动契约）", "node_overrides" in req)
+check(
+    "极简版 node_overrides 是多行文本（与专业版同规格）",
+    req["node_overrides"][0] == "STRING" and req["node_overrides"][1].get("multiline") is True,
+)
+check(
+    "极简版 node_overrides 带中文悬停说明且不承诺自动定位",
+    "nodeId" in req["node_overrides"][1].get("tooltip", "")
+    and "不会" in req["node_overrides"][1].get("tooltip", ""),
+)
 check("极简版声明了 hidden unique_id（用于前端上色）",
       it.get("hidden", {}).get("unique_id") == "UNIQUE_ID")
 check("极简版显示名为中文", getattr(Simple, "TITLE", "").startswith("RH 云端采样"))
@@ -546,7 +583,10 @@ check("专业版参数映射默认留空（新手不被示例 JSON 吓退）",
 check("专业版参数映射带悬停说明", "nodeId" in pit["node_overrides"][1].get("tooltip", ""))
 
 # ---------------------------------------------------------------------------
-print("\n=== 27. 连线跟随兜底：结构里看不到占位符时也能注入 ===")
+print("\n=== 27. 推倒连线兜底：没有占位符就不再产生任何注入 ===")
+# 契约变更：「沿采样器 positive/negative 连线向上游回溯找文本字段」的兜底已删除。
+# 下面这些结构以前能靠兜底命中，现在必须 0 命中、0 注入 —— 猜错就是静默失效，
+# 而 0 命中会由调用方（nodes.py）转成明确报错，比悄悄打一发无效注入好得多。
 
 # 用户真实场景：getJsonApiFormat 只返回采样器与连线，看不到文本节点的 widget 值
 struct_link = {
@@ -558,39 +598,44 @@ struct_link = {
     "161": {"class_type": "KSamplerAdvanced", "inputs": {"noise_seed": 2, "positive": ["270", 0], "negative": ["263", 0]}},
 }
 inj_l, stats_l = wf_mod.build_prompt_injections(struct_link, "1girl", "lowres")
-check("兜底：正向经连线命中", stats_l["positive"] >= 1, str(stats_l))
-check("兜底：负向经连线命中", stats_l["negative"] >= 1, str(stats_l))
-by_node_l = {(i["nodeId"], i["fieldName"]): i["fieldValue"] for i in inj_l}
-check("兜底：注入打到 270.text",
-      by_node_l.get(("270", "text")) == "1girl", str(by_node_l))
-check("兜底：注入打到 263.text",
-      by_node_l.get(("263", "text")) == "lowres", str(by_node_l))
-check("兜底：不会污染非提示词节点", ("266", "text") not in by_node_l)
-check("兜底：同一字段不重复注入（两个采样器共享同一编码节点）",
-      sum(1 for k in by_node_l if k == ("270", "text")) == 1)
+check("契约变更：不再沿采样器连线兜底（正向 0 命中）", stats_l["positive"] == 0, str(stats_l))
+check("契约变更：不再沿采样器连线兜底（负向 0 命中）", stats_l["negative"] == 0, str(stats_l))
+check("契约变更：不再产生任何注入", inj_l == [], str(inj_l))
+check("绝不污染非提示词节点（266 是共享触发词，被覆盖就是画面崩坏）",
+      all(i["nodeId"] != "266" for i in inj_l))
 
-# 连线指向的节点不在结构里（部分返回缺节点）-> 兜底放弃，命中数保持 0
+diag_l = wf_mod.prompt_link_diagnosis(struct_link, "positive")
+check("诊断语义改为「指引手写映射」而非「解释猜测失败」",
+      "参数映射" in diag_l and "占位符" in diag_l, diag_l)
+check("诊断给出可直接复制的模板", "{positive}" in diag_l and "nodeId" in diag_l, diag_l)
+check("诊断落到具体 nodeId（含数字，能定位）", any(ch.isdigit() for ch in diag_l), diag_l)
+
+# 连线指向的节点不在结构里（部分返回缺节点）-> 0 命中，行为与推倒前一致
 struct_missing = {
     "3": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["999", 0], "negative": ["998", 0]}},
 }
 inj_m, stats_m = wf_mod.build_prompt_injections(struct_missing, "a", "b")
-check("兜底：连线源缺失时安全放弃", stats_m["positive"] == 0 and stats_m["negative"] == 0 and inj_m == [])
+check("连线源缺失时安全放弃（保持 0 命中）",
+      stats_m["positive"] == 0 and stats_m["negative"] == 0 and inj_m == [])
 
-# 占位符已命中时，兜底不应画蛇添足
+# 占位符主路径不受推倒影响：这是作者显式声明的契约，必须继续成立
 inj_p, stats_p = wf_mod.build_prompt_injections(struct, "1girl", "bad")
-check("占位符主路径优先，不触发兜底",
+check("占位符主路径仍然只替换写了标记的节点",
       all(i["nodeId"] in ("6", "7") for i in inj_p) and len(inj_p) == 2)
 
-# 正负连线指向同一个节点：不产生互相覆盖的双注入
+# 正负连线指向同一个节点：不再有「positive 优先认领」这种猜测行为
 struct_same = {
     "270": {"class_type": "CLIPTextEncode", "inputs": {"text": "same node"}},
     "3": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["270", 0]}},
 }
 inj_s, stats_s = wf_mod.build_prompt_injections(struct_same, "pos", "neg")
-check("正负同节点时 positive 优先认领", stats_s["positive"] == 1 and stats_s["negative"] == 0, str(stats_s))
-check("正负同节点时只注入一条", len(inj_s) == 1 and inj_s[0]["fieldValue"] == "pos")
+check("契约变更：正负同节点也不再自动注入",
+      stats_s["positive"] == 0 and stats_s["negative"] == 0 and inj_s == [], str(stats_s))
 
-print("\n=== 28. 文本处理节点接在前面：沿上游连线回溯找落点 ===")
+print("\n=== 28. 文本处理节点接在前面：不再回溯，落点交回给用户手写 ===")
+# 契约变更：原「沿上游回溯到唯一可写字段」的逻辑已删除。它同时踩两条禁令：
+#   * 架构文档 §3.5「唯一即默认采用」——上游只有一个字符串字段不代表它就是提示词；
+#   * S0 fixture c5 已给出反例：唯一字段是模板前缀 prefix，覆盖它会破坏模板。
 
 # 用户场景：CLIPTextEncode 的 text 被上游「字符串拼接/通配符」节点接管，
 # 此时往编码节点注入 text 会被上游覆盖 —— 属于最坏的静默失效。
@@ -603,11 +648,15 @@ struct_chain = {
     "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["263", 0]}},
 }
 inj_c, stats_c = wf_mod.build_prompt_injections(struct_chain, "1girl", "lowres")
-# 上游有两个字符串字段且都没占位符 -> 不敢猜，保持 0 命中以便如实报警
+# 上游有两个字符串字段且都没占位符 -> 不猜，保持 0 命中（现在也不回溯了）
 check("上游多字段且无占位符时不猜（保持 0 命中）",
       stats_c["positive"] == 0 and stats_c["negative"] == 0 and inj_c == [], str(stats_c))
-check("多字段场景能给出精确诊断",
-      "多个文本字段" in wf_mod.prompt_link_diagnosis(struct_chain, "positive"))
+check("多字段场景的诊断点名候选节点",
+      "nodeId=300" in wf_mod.prompt_link_diagnosis(struct_chain, "positive"),
+      wf_mod.prompt_link_diagnosis(struct_chain, "positive"))
+check("多字段场景的诊断说明「机器无法判断该注入哪一个」",
+      "多个文本字段" in wf_mod.prompt_link_diagnosis(struct_chain, "positive"),
+      wf_mod.prompt_link_diagnosis(struct_chain, "positive"))
 
 # 上游只有一个字符串字段 -> 唯一确定，直接注入上游
 struct_one = {
@@ -619,13 +668,14 @@ struct_one = {
 }
 inj_o, stats_o = wf_mod.build_prompt_injections(struct_one, "1girl", "lowres")
 by_node_o = {(i["nodeId"], i["fieldName"]): i["fieldValue"] for i in inj_o}
-check("上游单字段时回溯注入成功", stats_o["positive"] == 1 and stats_o["negative"] == 1, str(stats_o))
-check("注入落到上游 300.text 而非被覆盖的 270",
-      by_node_o.get(("300", "text")) == "1girl", str(by_node_o))
-check("注入落到上游 301.text", by_node_o.get(("301", "text")) == "lowres")
-check("不再往被上游接管的节点注入（避免静默失效）", ("270", "text") not in by_node_o)
+# 契约变更：「上游只有一个字符串字段就认定唯一」= §3.5 明令禁止的拓扑假设，
+# c5 fixture 的反例就是它：唯一字段其实是模板前缀，覆盖后模板被破坏。
+check("契约变更：上游唯一字段也不再自动采用（§3.5 禁止）",
+      stats_o["positive"] == 0 and stats_o["negative"] == 0 and inj_o == [], str(stats_o))
+check("不再往上游 300.text 注入（避免覆盖模板前缀这类静默失效）",
+      ("300", "text") not in by_node_o)
 
-# 上游链更长（两级）也能挖到源头
+# 上游链更长（两级）同样不再回溯
 struct_deep = {
     "270": {"class_type": "CLIPTextEncode", "inputs": {"text": ["300", 0]}},
     "300": {"class_type": "TextJoin", "inputs": {"value": ["310", 0]}},
@@ -633,9 +683,8 @@ struct_deep = {
     "152": {"class_type": "KSampler", "inputs": {"seed": 1, "positive": ["270", 0], "negative": ["263", 0]}},
 }
 inj_d, stats_d = wf_mod.build_prompt_injections(struct_deep, "deep pos", "")
-check("两级上游链能挖到最源头", stats_d["positive"] == 1, str(stats_d))
-check("源头注入值正确",
-      any(i["nodeId"] == "310" and i["fieldValue"] == "deep pos" for i in inj_d))
+check("契约变更：两级上游链也不再回溯", stats_d["positive"] == 0 and inj_d == [], str(stats_d))
+check("不再往源头 310 注入", all(i["nodeId"] != "310" for i in inj_d))
 
 # 占位符写在上游节点里 -> 主路径直接命中（用户最该用的写法）
 struct_up = {
@@ -723,6 +772,159 @@ check("合并时音频为空则原样返回", not latent_mod.is_nested(merge_nod
 
 text = _describe_samples(parsed["samples"])
 check("复合 latent 的形状回显同时含视频与音频", "视频" in text and "音频" in text, text)
+
+# ---------------------------------------------------------------------------
+print("\n=== 31. 新红线：填了提示词却没有落点 -> 报错而不是警告 ===")
+from rhplugin.nodes import _require_prompt_targets, _submit_task
+
+# ① 无占位符 + 映射里没引用 -> 必须抛 RHUserError（静默失效比报错更糟）
+err = None
+try:
+    _require_prompt_targets(struct_link, {"positive": 0, "negative": 0}, "1girl", "lowres", "[]")
+except RHUserError as exc:
+    err = exc
+check("无占位符且不填映射 -> 报错", err is not None, "没有抛异常")
+if err is not None:
+    text = str(err)
+    check("报错文案给出可复制的映射模板",
+          '{"nodeId": "<ID>", "fieldName": "text", "fieldValue": "{positive}"}' in text, text)
+    check("报错文案提示用探查节点查 ID", "探查" in text, text)
+    check("报错文案说明后果（提示词根本不会送上去）", "静默失效" in text, text)
+    check("报错文案不携带任何密钥", "apiKey" not in text and "api_key" not in text)
+
+# ② 映射里引用了 {positive} -> 视为已指定落点，不报错（判据必须看替换前的原文）
+err2 = None
+try:
+    _require_prompt_targets(
+        struct_link,
+        {"positive": 0, "negative": 0},
+        "1girl",
+        "lowres",
+        '[{"nodeId": "270", "fieldName": "text", "fieldValue": "{positive}"},'
+        ' {"nodeId": "263", "fieldName": "text", "fieldValue": "{negative}"}]',
+    )
+except RHUserError as exc:
+    err2 = exc
+check("映射里指定了 {positive}/{negative} -> 不报错", err2 is None, str(err2))
+
+# ③ 云端有占位符 -> 不报错
+err3 = None
+try:
+    _require_prompt_targets(struct, {"positive": 1, "negative": 1}, "1girl", "bad", "[]")
+except RHUserError as exc:
+    err3 = exc
+check("占位符命中时不报错", err3 is None, str(err3))
+
+# ④ 结构拉不到时不能误报（无从判断，不能编造）
+err4 = None
+try:
+    _require_prompt_targets({}, {"positive": 0, "negative": 0}, "1girl", "bad", "[]")
+except RHUserError as exc:
+    err4 = exc
+check("结构缺失时不误报（沿用结构缺失提示）", err4 is None, str(err4))
+
+# ⑤ 没填提示词就不该管
+err5 = None
+try:
+    _require_prompt_targets(struct_link, {"positive": 0, "negative": 0}, "", "", "[]")
+except RHUserError as exc:
+    err5 = exc
+check("没填提示词时不报错", err5 is None, str(err5))
+
+print("\n=== 32. 803 逐条定位：10 条映射错 1 条要指名是哪一条 ===")
+
+
+class _FakeClient803:
+    """只模拟「提交即被 803 整包拒绝」的客户端。"""
+
+    def create_task(self, workflow_id, node_info_list, instance_type=None):
+        raise client_mod.RunningHubError(
+            "RunningHub 调用失败 —— 参数注入不合法：请确认 nodeId / fieldName 与云端工作流完全一致",
+            code=803,
+        )
+
+
+struct_803 = {
+    "3": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20, "positive": ["6", 0]}},
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "{positive}"}},
+}
+# 前 9 条合法（含字面量字段），第 10 条故意写错 fieldName
+node_info_list = [
+    {"nodeId": "3", "fieldName": "seed", "fieldValue": 1},
+    {"nodeId": "3", "fieldName": "steps", "fieldValue": 20},
+    {"nodeId": "6", "fieldName": "text", "fieldValue": "a"},
+] * 3 + [{"nodeId": "6", "fieldName": "txt", "fieldValue": "typo"}]
+
+err803 = None
+try:
+    _submit_task(_FakeClient803(), "wf", node_info_list, struct_803, False)
+except RHUserError as exc:
+    err803 = exc
+check("803 被转成中文 RHUserError", err803 is not None)
+if err803 is not None:
+    msg = str(err803)
+    check("先给结论：共几条、错了几条",
+          "共提交 10 条映射" in msg and "1 条不合法" in msg, msg)
+    check("点名第几条", "第 10 条" in msg, msg)
+    check("点名 nodeId 与 fieldName", "nodeId=6" in msg and "fieldName=txt" in msg, msg)
+    check("说明该节点可用字段（用户照着改即可）", "可用字段" in msg, msg)
+    check("末尾给出修法指引", "修法" in msg and "探查" in msg, msg)
+    check("803 文案不携带密钥", "apiKey" not in msg)
+    check("只列有问题的那一条，不刷屏", msg.count("问题：") == 1, msg)
+
+# 错的是连线字段时，要说明「被连线接管」而不是笼统说字段不存在
+err_link = None
+try:
+    _submit_task(
+        _FakeClient803(), "wf",
+        [{"nodeId": "3", "fieldName": "positive", "fieldValue": "x"}],
+        struct_803, False,
+    )
+except RHUserError as exc:
+    err_link = exc
+check("注入到连线字段时 803 文案说明「被连线接管」",
+      err_link is not None and "连线" in str(err_link), str(err_link))
+
+# 结构拿不到时不能编造逐条结论，必须如实说无法定位
+err_nostruct = None
+try:
+    _submit_task(
+        _FakeClient803(), "wf",
+        [{"nodeId": "3", "fieldName": "seed", "fieldValue": 1}],
+        {}, False,
+    )
+except RHUserError as exc:
+    err_nostruct = exc
+check("结构缺失时如实说无法逐条定位（不编造）",
+      err_nostruct is not None and "无法逐条定位" in str(err_nostruct), str(err_nostruct))
+
+# 非 803 的错误不能被误吞
+class _FakeClient500:
+    def create_task(self, workflow_id, node_info_list, instance_type=None):
+        raise client_mod.RunningHubError("余额不足", code=402)
+
+
+err_other = None
+try:
+    _submit_task(_FakeClient500(), "wf", [], struct_803, False)
+except client_mod.RunningHubError as exc:
+    err_other = exc
+check("非 803 错误原样向上抛（不被误吞）",
+      err_other is not None and getattr(err_other, "code", None) == 402, str(err_other))
+
+print("\n=== 33. 探查节点：输出可直接复制的映射模板 ===")
+templates = wf_mod.mapping_templates(struct_803)
+check("字面量字段给出可复制片段",
+      '{"nodeId": "6", "fieldName": "text", "fieldValue": "{positive}"}' in templates, templates)
+check("片段是合法 JSON（复制即可用）",
+      any(line.strip().startswith("{") and _json.loads(line.strip())["nodeId"] == "6"
+          for line in templates.splitlines()))
+check("连线字段不给模板且明确标注",
+      "positive 是连线字段" in templates and "不能注入" in templates, templates)
+check("连线字段标注了来源节点", "由 nodeId=6 提供" in templates, templates)
+check("模板里区分了字面量与连线两类字段",
+      '{"nodeId": "3", "fieldName": "steps", "fieldValue": 20}' in templates, templates)
+check("空结构不炸且返回空串", wf_mod.mapping_templates({}) == "")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)

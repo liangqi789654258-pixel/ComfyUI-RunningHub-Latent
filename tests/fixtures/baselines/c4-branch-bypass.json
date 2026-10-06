@@ -1,13 +1,13 @@
 {
   "case_id": "c4-branch-bypass",
   "diagnosis": {
-    "negative": "云端结构里 nodeId=7 的 text 不可写入",
-    "positive": "云端结构里 nodeId=6 的 text 不可写入"
+    "negative": "云端结构共读到 15 个节点，但没有一处 {negative} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=6 [CLIPTextEncode] 「正面提示词」.text、nodeId=7 [CLIPTextEncode] 「负面提示词」.text、nodeId=40 [CLIPTextEncode] 「备用分支提示词（已旁路）」.text、nodeId=41 [CLIPTextEncode] 「备用分支负向（已旁路）」.text。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{negative}\"}；也可以直接在云端文本节点的文本框里写上 {negative} 标记，本节点会自动替换。",
+    "positive": "云端结构共读到 15 个节点，但没有一处 {positive} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=6 [CLIPTextEncode] 「正面提示词」.text、nodeId=7 [CLIPTextEncode] 「负面提示词」.text、nodeId=40 [CLIPTextEncode] 「备用分支提示词（已旁路）」.text、nodeId=41 [CLIPTextEncode] 「备用分支负向（已旁路）」.text。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{positive}\"}；也可以直接在云端文本节点的文本框里写上 {positive} 标记，本节点会自动替换。"
   },
   "expect_current": {
     "status": "injected_suspect",
     "violation": "不变量 B",
-    "why": "占位符主路径扫描全部字符串字段时不看节点执行态，两个 bypass 节点（nodeId 40 / 41，直属 \"mode\": 4）上的占位符同样被替换 → 一半注入落到不会执行的节点上，违反不变量 B（可达性：落点必须在实际会被执行的路径上，旁路/未选分支上的节点注入后不会被执行）；同时 steps / cfg / start_at_step / end_at_step 均为 [] 连线，当前实现既不解析也不告警。"
+    "why": "占位符主路径扫描全部字符串字段时不看节点执行态，两个 bypass 节点（nodeId 40 / 41，直属 \"mode\": 4）上的占位符同样被替换 → 一半注入落到不会执行的节点上，违反不变量 B（可达性：落点必须在实际会被执行的路径上，旁路/未选分支上的节点注入后不会被执行）；同时 steps / cfg / start_at_step / end_at_step 均为 [] 连线，当前实现既不解析也不告警（连线兜底已推倒，本形态的注入现在全部来自占位符）。"
   },
   "hit_stats": {
     "negative": 2,

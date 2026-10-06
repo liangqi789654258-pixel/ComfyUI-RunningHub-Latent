@@ -1,29 +1,18 @@
 {
   "case_id": "c6a-no-placeholder-direct",
   "diagnosis": {
-    "negative": "云端结构里 nodeId=7 的 text 不可写入",
-    "positive": "云端结构里 nodeId=6 的 text 不可写入"
+    "negative": "云端结构共读到 7 个节点，但没有一处 {negative} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=6 [CLIPTextEncode] 「正面提示词」.text、nodeId=7 [CLIPTextEncode] 「负面提示词」.text。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{negative}\"}；也可以直接在云端文本节点的文本框里写上 {negative} 标记，本节点会自动替换。",
+    "positive": "云端结构共读到 7 个节点，但没有一处 {positive} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=6 [CLIPTextEncode] 「正面提示词」.text、nodeId=7 [CLIPTextEncode] 「负面提示词」.text。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{positive}\"}；也可以直接在云端文本节点的文本框里写上 {positive} 标记，本节点会自动替换。"
   },
   "expect_current": {
-    "status": "already_ok",
-    "why": "占位符 0 命中触发兜底：采样器连线源自带 text 字段且文本是字面量，正负两端各命中 1 处（整值覆盖）。"
+    "status": "regression_open",
+    "why": "推倒连线兜底后本形态不再有任何自动注入：工作流里没有 {positive}/{negative} 占位符，采样器连线源虽然自带 text 字面量（旧实现正是靠兜底命中它），但本节点不再沿连线猜测 → 0 命中、0 注入，由上层在用户填了提示词时转为明确报错。"
   },
   "hit_stats": {
-    "negative": 1,
-    "positive": 1
+    "negative": 0,
+    "positive": 0
   },
-  "injections": [
-    {
-      "fieldName": "text",
-      "fieldValue": "<<POS_SENTINEL>>",
-      "nodeId": "6"
-    },
-    {
-      "fieldName": "text",
-      "fieldValue": "<<NEG_SENTINEL>>",
-      "nodeId": "7"
-    }
-  ],
+  "injections": [],
   "link_field_count": 9,
   "node_count": 7,
   "placeholder_hits": {

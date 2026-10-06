@@ -71,9 +71,10 @@ pip install -r requirements.txt
 
 ### 第三步：本地跑通
 
-- **极简版**：拖 `RH 云端采样 · 极简版`，只有 `api_key` 和 `workflow_id`
-  两个输入框，填完把 latent 接到本地 `VAEDecode` / `VAEDecodeTiled` →
-  `SaveImage`。完事。提示词直接在云端工作流里改好；每次运行自动换随机种子。
+- **极简版**：拖 `RH 云端采样 · 极简版`，填 `api_key` 和 `workflow_id`
+  （第三个 `node_overrides` 留空即可），把 latent 接到本地 `VAEDecode` /
+  `VAEDecodeTiled` → `SaveImage`。完事。提示词直接在云端工作流里改好；
+  每次运行自动换随机种子。
 - **专业版**：同样开箱即用（自动注入提示词与种子）。只有想本地调
   步数 / CFG / 尺寸等云端参数时才需要填 `node_overrides`（见下节）。
 
@@ -87,13 +88,24 @@ pip install -r requirements.txt
 ● nodeId=6  [CLIPTextEncode]
     fieldName = text       当前值 = 1 girl
 
+── 可直接复制的参数映射片段 ──
+（复制进参数映射框，只改 fieldValue；标 × 的是连线字段，不能注入）
+
+● nodeId=3  [KSampler]
+    {"nodeId": "3", "fieldName": "seed", "fieldValue": 0}
+    {"nodeId": "3", "fieldName": "steps", "fieldValue": 20}
+    × positive 是连线字段（由 nodeId=6 提供）—— 不能注入，不提供模板
+● nodeId=6  [CLIPTextEncode]
+    {"nodeId": "6", "fieldName": "text", "fieldValue": "1 girl"}
+
 ── 自动定位检查 ──
 提示词占位符：{positive} 命中 1 处，{negative} 命中 1 处
-  → 极简版可以自动注入提示词。
+  → 本插件会自动替换这些占位符（提示词无需手写落点）。
 随机种子：命中 1 个可注入字段（nodeId=3.seed）
 ```
 
-它会直接告诉你这条工作流能不能被极简版自动注入。
+它会直接告诉你这条工作流能不能自动注入提示词；想改任何云端参数，
+复制上面的片段改 `fieldValue` 即可。
 
 ### 不想每次都粘贴 API Key？
 
@@ -115,7 +127,7 @@ poll_interval = 5
 
 | 节点 | 用途 | 适合谁 |
 |------|------|--------|
-| **RH 云端采样 · 极简版** | **只有 2 个输入框**（api_key、workflow_id），填完即用；种子每次自动随机 | 新手 / 云端调好直接出图 |
+| **RH 云端采样 · 极简版** | 填 api_key + workflow_id 即用（`node_overrides` 留空）；种子每次自动随机 | 新手 / 云端调好直接出图 |
 | **RH 云端采样 · 专业版** | 自动注入提示词与种子 + `node_overrides` 完整参数映射 | 需要本地调 step / cfg / 尺寸 / 二采 denoise |
 | **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
 | **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
@@ -136,9 +148,15 @@ poll_interval = 5
 因为它不认节点类型、只认占位符文本，所以单文本节点、双 CLIPTextEncode、
 甚至提示词藏在第三方节点里都能命中。
 
+> **自动注入到此为止，不做拓扑猜测。** 图像大小设置和提示词的接法每条工作流
+> 都不一样（文本节点前面接字符串拼接、通配符、透传节点的情况随处可见），
+> 按连线猜出来的落点一旦错了就是**静默失效**。因此没有占位符 = 没有自动落点：
+> 节点会**直接报错**并给出可复制的映射模板，而不是悄悄跑完。
+> 换句话说，除了占位符和种子，其余一切参数都请在 `node_overrides` 里手写。
+
 - **极简版**：把自动注入之外的一切都藏起来。没有提示词输入框（沿用云端文案）、
   没有种子滑块（每次自动随机）、没有 timeout（走 config.ini）。
-  想要固定种子或本地改提示词，换专业版。
+  想改云端任何参数就填 `node_overrides`；想要固定种子或本地改提示词，换专业版。
 - **专业版**：自动注入照常生效，`positive` / `negative` 输入框可直接改提示词；
   再叠加 `node_overrides` 手工映射，**映射与自动注入冲突时以映射为准**：
 
@@ -156,8 +174,10 @@ poll_interval = 5
 | `api_key` | 留空则读 config.ini / config.json |
 | `workflow_id` | RunningHub 工作流 ID |
 
-**极简版**：没有其他任何输入框。timeout / poll_interval / use_cache /
-use_high_performance 全部走 config.ini（见下），不占画布。
+**极简版**：除了上面两个（外加可选留空的 `node_overrides`）没有其他输入框。
+timeout / poll_interval / use_cache / use_high_performance 全部走 config.ini（见下），
+不占画布。它的 `node_overrides` **不支持** `{positive}` / `{negative}` 占位符
+（本节点没有提示词输入框），只支持 `{seed}`。
 
 **专业版独有**
 
@@ -261,9 +281,10 @@ H3 采样器 →┬─ VAEDecode(H3 视频 VAE)      → VHS_VideoCombine(24fps)
 
 所有情况都会被明确告知（节点变黄 + report 写明），不会静默失败：
 
-1. **云端没写占位符，映射里也没引用** → report 提示
-   「没有找到 {positive} 占位符」。两种修法：去云端文本节点把内容改成
-   `{positive}`（推荐）；或在 `node_overrides` 映射里用 `{positive}` 指定注入位置。
+1. **云端没写占位符，映射里也没引用** → **直接报错中止**（不会静默跑完），
+   报「没有 {positive} 占位符」并给出可复制的映射模板。两种修法：
+   去云端文本节点把内容改成 `{positive}`（推荐）；或在 `node_overrides`
+   映射里用 `{positive}` 指定注入位置。
 2. **nodeId 换工作流后失效** → 打开 `validate_mapping`，会直接告诉你
    「nodeId『6』在云端工作流里不存在」。
 3. **极简版没找到种子字段** → report 提示沿用云端默认种子（可能重复出图）。
@@ -282,9 +303,10 @@ H3 采样器 →┬─ VAEDecode(H3 视频 VAE)      → VHS_VideoCombine(24fps)
 1. 先看 report 里的「**本次提交的正面提示词：…**」——这一行显示的是真正送进
    云端的内容。如果它不是你写的那串，说明链路接错了（常见的是接到了上游
    节点的 help / 说明类输出口，而不是它的文本输出口）。
-2. 云端工作流里如果文本节点前面也接了处理节点，插件会**沿连线向上游回溯**
-   找到真正能写入的字段；上游有多个文本字段且都没写占位符时会明确报警
-   「无法判断该注入哪一个」，此时请在 `node_overrides` 里直接指定节点。
+2. 云端工作流里如果文本节点前面也接了处理节点，**插件不会沿连线回溯**
+   （每条工作流的接法都不一样，猜错就是静默失效）。此时请在 `node_overrides`
+   里直接指定节点——诊断文案会列出候选的 `nodeId.fieldName`，
+   上游有多个文本字段时还会提示「无法判断该注入哪一个，请按语义自行选择」。
 3. 上游输出空字符串时，插件现在会报警「提示词是空的，但云端有 N 处
    {positive} 标记」——否则云端提示词会被替换成空内容且一声不响。
 
@@ -294,7 +316,19 @@ H3 采样器 →┬─ VAEDecode(H3 视频 VAE)      → VHS_VideoCombine(24fps)
 
 **`参数注入不合法`（code 803）**
 nodeId / fieldName 与云端不一致，或者用了 `value` 而非 `fieldValue`。
-用「RH 工作流参数探查」节点核对。
+平台只说「整包不合法」，本插件会拿已拉到的云端结构**逐条对照**并直接点名：
+
+```
+云端拒绝了本次参数映射（错误码 803：nodeInfoList 与云端工作流不一致）。
+本次共提交 10 条映射。
+
+其中 1 条不合法：
+  第 10 条  nodeId=6  fieldName=txt
+      问题：nodeId「6」没有字段「txt」，该节点可用字段：text
+```
+
+照着改即可；连线字段被注入时会额外提示「该字段已被上游连线接管，平台不建议修改」。
+用「RH 工作流参数探查」节点可以直接复制正确的映射片段。
 
 **`鉴权失败`（code 412 / 812）**
 API Key 无效、过期，或该 Key 类型无权调用工作流 API。工作流 API 支持

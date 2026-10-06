@@ -2,6 +2,44 @@
 
 本项目所有值得记录的变更都会写在这里，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [未发布] - 推倒自动匹配提示词，改为纯手动映射
+
+用户拍板：「图像大小设置和提示词应用每条工作流都不一样，手动靠谱」。
+
+### 删除：沿连线回溯的提示词兜底
+
+`core/workflow.py` 的 `_upstream_text_source` / `_linked_prompt_targets` 已删除，
+`build_prompt_injections` 现在**只认占位符**，不再沿采样器的 positive/negative
+连线向上游找文本字段。理由：猜出来的落点一旦错了就是静默失效（用户以为生效了，
+其实没送上去），而「上游唯一字段即采用」正是架构文档 §3.5 明令禁止的拓扑假设
+（S0 fixture c5 就是反例：唯一字段其实是模板前缀 `prefix`）。
+
+保留不变：`{positive}` / `{negative}` 占位符路径（作者显式声明的契约）、
+种子自动定位（seed 语义明确，多采样器统一注入同一 seed 是想要的行为）。
+
+### 新增 / 修改
+
+- **提示词落点红线升级为报错**：填了提示词但云端没有占位符、映射里也没指定落点
+  → 抛 `RHUserError` 中止（原先只是 warning）。报错文案带可复制的映射模板
+  `{"nodeId": "<ID>", "fieldName": "text", "fieldValue": "{positive}"}`，
+  并提示用「RH 工作流参数探查」查 nodeId。结构拉不到时不误报。
+- **极简版新增 `node_overrides` 输入框**：改云端任何参数都要手写。
+  该框不支持 `{positive}` / `{negative}`（本节点没有提示词输入框，
+  引用了会被替换成空串 = 静默失效），写了会直接报错。
+- **803 逐条定位**：`RunningHubError` 带上 `code`；提交处捕获 803 后用已拉到的
+  云端结构逐条对照，报「共 N 条，其中 M 条不合法」并点名第几条 / nodeId /
+  fieldName / 该节点可用字段，末尾给修法指引。
+- **不变量 A 落地到校验**：`validate_injections` 现在也拒绝向连线字段（`[]` 形态）
+  注入，报错说明「该字段已被上游连线接管，平台不建议修改」。
+  新增 `diagnose_injections` 做逐条（与入参一一对应）诊断。
+- **探查节点输出可直接复制的映射片段**：`wf_mod.mapping_templates()`
+  为每个字面量字段输出完整 JSON 片段，连线字段标注 × 且不给模板。
+- `prompt_link_diagnosis` 语义改为「指引手写映射」（原先是解释自动定位为什么失败）。
+
+### 行为变化（S0 基线已重录）
+
+9 个 fixture 中 c5 / c6a / c7 从「有注入」变为 0 命中 0 注入；`truth` 未改。
+
 ## [未发布] - 通用参数注入重构 S2：发现层 + Snapshot 模型
 
 新增 `core/snapshot.py`：把 `getJsonApiFormat` 的原始结构固化成带标注的快照——

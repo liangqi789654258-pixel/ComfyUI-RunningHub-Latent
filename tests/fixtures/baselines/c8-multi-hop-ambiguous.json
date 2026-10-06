@@ -1,12 +1,12 @@
 {
   "case_id": "c8-multi-hop-ambiguous",
   "diagnosis": {
-    "negative": "nodeId=7 的提示词由上游 nodeId=81 提供，而上游有多个文本字段（text_a、text_b），无法判断该注入哪一个",
-    "positive": "nodeId=6 的提示词由上游 nodeId=80 提供，而上游有多个文本字段（text_a、text_b），无法判断该注入哪一个"
+    "negative": "云端结构共读到 9 个节点，但没有一处 {negative} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=80 [StringConcat] 「文本拼接·正」.text_a、nodeId=81 [StringConcat] 「文本拼接·负」.text_a、nodeId=80 [StringConcat] 「文本拼接·正」.text_b、nodeId=81 [StringConcat] 「文本拼接·负」.text_b。（注意：nodeId=80 有多个文本字段（text_a、text_b），无法判断该注入哪一个，请按语义自行选择。）（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{negative}\"}；也可以直接在云端文本节点的文本框里写上 {negative} 标记，本节点会自动替换。",
+    "positive": "云端结构共读到 9 个节点，但没有一处 {positive} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=80 [StringConcat] 「文本拼接·正」.text_a、nodeId=81 [StringConcat] 「文本拼接·负」.text_a、nodeId=80 [StringConcat] 「文本拼接·正」.text_b、nodeId=81 [StringConcat] 「文本拼接·负」.text_b。（注意：nodeId=80 有多个文本字段（text_a、text_b），无法判断该注入哪一个，请按语义自行选择。）（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{positive}\"}；也可以直接在云端文本节点的文本框里写上 {positive} 标记，本节点会自动替换。"
   },
   "expect_current": {
     "status": "ambiguous_reject",
-    "why": "上游节点有多个字符串字段且都没有占位符，无法确定唯一落点 → 拒绝猜测，保持 0 命中（这正是期望行为）；诊断信息会说明是哪个上游节点、有哪些候选字段。"
+    "why": "推倒连线兜底后本形态不再是「实现主动拒绝猜测」，而是「实现根本不猜」：没有占位符 → 0 命中、0 注入。诊断仍然点名候选节点与字段（nodeId=80 有 text_a / text_b 多个文本字段，无法判断该注入哪一个），交由用户按语义选择 —— 这与人工判断一致（truth 给的是候选而非结论）。"
   },
   "hit_stats": {
     "negative": 0,

@@ -4,25 +4,34 @@ ComfyUI 节点定义。
 ## 两个核心版本怎么选
 
 * **极简版**（RH 云端采样 · 极简版）
-  画布上只有 api_key 和 workflow_id 两个输入框，填完就能出图。
+  填 api_key 和 workflow_id 就能出图，第三个 `node_overrides` 留空即可。
   提示词完全沿用云端默认文案，种子每次执行自动随机；其余参数走 config.ini。
+  想改云端任何参数就在 `node_overrides` 里手写（不支持 {positive}/{negative}）。
 
 * **专业版**（RH 云端采样 · 专业版）
   在极简版同一套自动注入之外，额外暴露 nodeInfoList 参数映射，
   可以精确改写云端任意节点的任意字段（步数 / CFG / 尺寸等）。
   手工映射与自动注入冲突时，以手工映射为准。
 
-## 为什么「自动定位」能成立
+## 参数注入的两条通道
 
 RunningHub 的参数注入接口要求必须给出 nodeId：
 
     nodeInfoList = [{"nodeId": "6", "fieldName": "text", "fieldValue": "1 girl"}]
 
-极简版的做法是：先用 getJsonApiFormat 把云端工作流结构拉下来，然后在**所有字符串
-字段**里搜索 `{positive}` / `{negative}` 标记并替换，再找采样器的 seed 字段注入种子。
-因为不依赖具体的 class_type，所以能兼容任意结构的工作流。
+1. **占位符替换（自动）**：先用 getJsonApiFormat 把云端工作流结构拉下来，然后在
+   **所有字符串字段**里搜索 `{positive}` / `{negative}` 标记并替换，再找采样器的
+   seed 字段注入种子。因为不依赖具体的 class_type，能兼容任意结构的工作流。
+   种子语义明确，多采样器统一注入同一个 seed 是我们要的行为，因此保留。
 
-**红线**：只要用户填了提示词却一个占位符都没匹配到，必须显式警告，绝不允许静默失效。
+2. **参数映射（手动，`node_overrides`）**：两个版本节点都有这个框。
+
+曾经存在一条「沿采样器 positive/negative 连线向上游回溯找文本字段」的兜底通道，
+**已推倒**：图像大小设置和提示词的接法每条工作流都不一样，猜出来的落点一旦错了
+就是静默失效（用户以为生效了，其实没送上去）。现在没有占位符 = 没有自动落点。
+
+**红线**：用户填了提示词却一个占位符都没匹配到、映射里也没指定落点时，
+必须**报错**中止，绝不允许静默跑完。
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ import json
 import os
 import random
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -441,6 +450,201 @@ def _resolve_outputs_to_latent(
 
 
 # ---------------------------------------------------------------------------
+# 提示词落点红线 + 803 逐条定位
+# ---------------------------------------------------------------------------
+
+
+def _require_prompt_targets(
+    structure: Dict[str, Any],
+    stats: Dict[str, int],
+    positive: str,
+    negative: str,
+    overrides_json: str,
+) -> None:
+    """填了提示词却没有落点 -> **直接报错**（极简版与专业版共用的判定）。
+
+    为什么从「警告」升级为「报错」：自动沿连线猜测落点的能力已推倒
+    （每条工作流的提示词接法都不一样，猜错就是静默失效）。在新的纯手动契约下，
+    「填了提示词但没有占位符、映射里也没指定落点」意味着这次运行**根本不会把
+    提示词送上去**，用户会拿到云端默认文案却以为是自己的提示词生效了——
+    这比报错更糟。
+
+    `overrides_json` 必须是**占位符替换前**的映射原文，否则用户写的
+    `{positive}` 已经变成提示词文本，会被误判成「没有指定落点」。
+
+    结构拉不到时直接返回：无从判断，不能编造（沿用「结构缺失」那条提示）。
+    """
+    if not structure:
+        return
+
+    for token, label, value in (
+        ("positive", "正面提示词", positive),
+        ("negative", "负面提示词", negative),
+    ):
+        if not str(value or "").strip():
+            continue
+        if int(stats.get(token, 0) or 0) > 0:
+            continue
+        if "{" + token + "}" in overrides_json:
+            continue
+        reason = wf_mod.prompt_link_diagnosis(structure, token)
+        raise RHUserError(
+            f"{label}已填写，但云端工作流里没有 {{{token}}} 占位符，"
+            f"参数映射里也没有引用 {{{token}}} —— 本次不会有任何提示词被送到云端，"
+            "继续跑只会拿到云端默认文案（静默失效，比报错更糟）。\n"
+            f"定位结果：{reason}\n"
+            "请在参数映射里补一条（复制后把 nodeId 换成你自己的）：\n"
+            f'  {{"nodeId": "<ID>", "fieldName": "text", "fieldValue": "{{{token}}}"}}\n'
+            f"nodeId 用「RH 工作流参数探查」节点查询；"
+            f"也可以在云端文本节点的文本框里写上 {{{token}}} 标记，本节点会自动替换。"
+        )
+
+
+def _warn_empty_prompt_vs_placeholder(
+    structure: Dict[str, Any],
+    positive: str,
+    negative: str,
+    extra_hint: str,
+    warnings: List[str],
+) -> None:
+    """空提示词撞上云端占位符 = 会把云端提示词替换成空内容，必须说出来。
+
+    这个场景没有任何报错、画面也完全不对，是排查成本最高的一类静默失效。
+    """
+    if not structure:
+        return
+    hits = wf_mod.placeholder_hits(structure)
+    for token, label, value in (
+        ("positive", "正面提示词", positive),
+        ("negative", "负面提示词", negative),
+    ):
+        if str(value or "").strip() or int(hits.get(token, 0) or 0) <= 0:
+            continue
+        warnings.append(
+            f"{label}是空的，但云端工作流里有 {hits[token]} 处 {{{token}}} 标记，"
+            "本次会把云端提示词替换为空内容（画面对不上却没有任何报错，就是这个原因）。\n"
+            f"{extra_hint}"
+        )
+
+
+def _diagnose_803(
+    structure: Dict[str, Any],
+    node_info_list: List[Dict[str, Any]],
+    raw_message: str,
+    refresher: "Optional[Callable[[], Dict[str, Any]]]" = None,
+) -> str:
+    """把平台 803「nodeInfoList 整包不合法」翻译成**逐条**清单。
+
+    病根：平台只在提交阶段回一句「不合法」，10 条映射错 1 条时用户根本看不出
+    是哪一条。而我们手里同时握着 `structure` 和 `diagnose_injections()`，
+    完全可以逐条对照后指名道姓。
+    """
+    total = len(node_info_list)
+    lines = [
+        "云端拒绝了本次参数映射（错误码 803：nodeInfoList 与云端工作流不一致）。",
+        f"本次共提交 {total} 条映射。",
+        "",
+    ]
+
+    if not structure:
+        lines.extend(
+            [
+                "本次没能读到云端工作流结构，无法逐条定位（请确认工作流 ID 正确且已保存）。",
+                f"平台原始提示：{raw_message}",
+                "",
+                "请用「RH 工作流参数探查」节点重新拉一份真实的 nodeId / fieldName 清单后逐条核对。",
+            ]
+        )
+        return "\n".join(lines)
+
+    problems = wf_mod.diagnose_injections(structure, node_info_list)
+    bad = [
+        (idx + 1, item, problem)
+        for idx, (item, problem) in enumerate(zip(node_info_list, problems))
+        if problem is not None
+    ]
+
+    if not bad and refresher is not None:
+        # 本地结构是带 TTL 的进程内缓存；云端刚改完工作流时它可能是旧的，于是
+        # 「逐条对照后没有问题」这个结论本身就不成立。平台已经拒绝了本次提交
+        # （803 不计费），多拉一次结构成本很低，值得换一个可信的结论。
+        # 刷新失败不能掩盖原始报错，所以这里吞掉异常退回原结论。
+        try:
+            fresh = refresher()
+        except Exception:  # noqa: BLE001 - 诊断阶段不允失败影响主流程
+            fresh = {}
+        if fresh:
+            problems = wf_mod.diagnose_injections(fresh, node_info_list)
+            bad = [
+                (idx + 1, item, problem)
+                for idx, (item, problem) in enumerate(zip(node_info_list, problems))
+                if problem is not None
+            ]
+            if bad:
+                lines.append("（本地缓存的结构可能已过期，已强制重新拉取云端结构后定位到问题）")
+                lines.append("")
+
+    if not bad:
+        lines.extend(
+            [
+                "逐条对照云端结构后**没有**发现不合法的项。",
+                "常见原因是类型不匹配（该字段只接受数字却提交了字符串），"
+                "或云端工作流在你上次运行之后被改过。",
+                f"平台原始提示：{raw_message}",
+                "",
+                "请用「RH 工作流参数探查」重新拉一次清单，对照字段的当前值形态填写。",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.append(f"其中 {len(bad)} 条不合法：")
+    for idx, item, problem in bad:
+        lines.append(
+            f"  第 {idx} 条  nodeId={item.get('nodeId')}  fieldName={item.get('fieldName')}"
+        )
+        lines.append(f"      问题：{problem}")
+    lines.extend(
+        [
+            "",
+            "修法：",
+            "  1. 用「RH 工作流参数探查」节点重新拉一次清单（它会直接给出可复制的映射片段）；",
+            "  2. 把上面点名的 nodeId / fieldName 改成清单里的真实值；",
+            "  3. 连线字段（探查结果里标 × 的）不能注入，请改注上游的字面量字段。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _submit_task(
+    client: "client_mod.RunningHubClient",
+    workflow_id: str,
+    node_info_list: List[Dict[str, Any]],
+    structure: Optional[Dict[str, Any]],
+    use_high_performance: bool,
+) -> str:
+    """提交任务；遇到 803 时转成带逐条清单的中文错误。"""
+    try:
+        return client.create_task(
+            workflow_id,
+            node_info_list,
+            instance_type="plus" if use_high_performance else None,
+        )
+    except client_mod.RunningHubError as exc:
+        if getattr(exc, "code", None) == client_mod.CODE_PARAM_INVALID:
+            raise RHUserError(
+                _diagnose_803(
+                    structure or {},
+                    node_info_list,
+                    str(exc),
+                    refresher=lambda: client.get_workflow_structure(
+                        workflow_id, force=True
+                    ),
+                )
+            ) from exc
+        raise
+
+
+# ---------------------------------------------------------------------------
 # 共用执行流程
 # ---------------------------------------------------------------------------
 
@@ -456,8 +660,11 @@ def _run_sampling(
     use_high_performance: bool,
     warnings: List[str],
     unique_id: Any = None,
+    structure: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, torch.Tensor], str, List[str]]:
     """提交 -> 轮询 -> 下载 -> 组装报告。两个版本节点共用。
+
+    `structure` 只用于 803 的逐条定位（提交失败时拿它逐条核对 nodeInfoList）。
 
     返回 (latent, task_id, report_lines)。
     """
@@ -484,10 +691,8 @@ def _run_sampling(
         _emit("generator", label)
 
     _on_stage("提交中")
-    task_id = client.create_task(
-        workflow_id,
-        node_info_list,
-        instance_type="plus" if use_high_performance else None,
+    task_id = _submit_task(
+        client, workflow_id, node_info_list, structure, use_high_performance
     )
     _emit("generator", f"任务已提交，taskId={task_id}")
     pbar.update(1)
@@ -600,7 +805,8 @@ def _warn_missing_structure(warnings: List[str]) -> None:
     warnings.append(
         "没能读到云端工作流结构，自动注入已跳过（提示词/种子将沿用云端默认值）。"
         "请确认工作流 ID 正确且已保存（草稿状态无法被调用）；"
-        "若持续失败可改用「专业版」手动填 nodeId。"
+        "若持续失败，请在参数映射里手动填 nodeId / fieldName"
+        "（用「RH 工作流参数探查」或在 RunningHub 网页编辑器里查 ID）。"
     )
 
 
@@ -610,7 +816,7 @@ def _warn_missing_structure(warnings: List[str]) -> None:
 
 
 class RunningHubLatentGeneratorSimple:
-    """真正的零配置节点：画布上只有 api_key 和 workflow_id 两个输入框。
+    """零配置节点：默认只填 api_key 和 workflow_id 就能出图。
 
     设计原则（用户原话：「什么都不用调，填入 api_key 和 workflow_id
     直接就能接 latent 解码出图」）：
@@ -620,6 +826,11 @@ class RunningHubLatentGeneratorSimple:
         保证每次点运行都能出新图，而不是拿到同一张旧图；
       * timeout / poll_interval / use_cache 等参数不做成 widget，
         全部走 config.ini 的全局配置，想调的高级用户去配置文件里改。
+
+    为什么要多出 `node_overrides` 一个框（原本这里是只有两个输入框的极简契约）：
+    「图像大小设置和提示词应用每条工作流都不一样」，靠节点去猜必然猜错。
+    因此想改云端任何参数（尺寸 / 步数 / 提示词落点）都必须在这里手写映射——
+    宁可多一个框，也不要打一发静默失效的注入。
 
     红线依然成立：种子没能注入时在 report 里明确警告，不静默。
     """
@@ -647,6 +858,29 @@ class RunningHubLatentGeneratorSimple:
                                    "留空则读取配置文件里的 default_workflow_id。",
                     },
                 ),
+                "node_overrides": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "placeholder": "advanced：参数映射 JSON（可选，留空即可。悬停查看格式）",
+                        "tooltip": (
+                            "【改云端参数时才需要填】留空 = 完全使用云端默认值。\n"
+                            "\n"
+                            "本节点不会替你猜测提示词或尺寸的落点——每条工作流的接法都不一样，\n"
+                            "猜错就是静默失效。要改就必须在这里手写清楚。\n"
+                            "\n"
+                            "格式（整个是 JSON 数组）：\n"
+                            '[{"nodeId": "3", "fieldName": "steps", "fieldValue": 30}]\n'
+                            "\n"
+                            "  * nodeId / fieldName：用「RH 工作流参数探查」节点查（它会直接给出可复制的片段）；\n"
+                            "  * fieldValue：直接写值；可写 {seed} 占位符绑定到本次随机种子；\n"
+                            "    本节点没有提示词输入框，因此**不支持** {positive} / {negative}；\n"
+                            "  * 连线字段（探查结果里标 × 的）不能注入；\n"
+                            "  * 想改提示词请改用「专业版」节点。"
+                        ),
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -658,7 +892,8 @@ class RunningHubLatentGeneratorSimple:
     TITLE = "RH 云端采样 · 极简版"
     DESCRIPTION = (
         "只填 API Key 和工作流 ID，其余全部沿用云端默认值。\n"
-        "每次运行自动换随机种子；提示词请直接在云端工作流里改好。"
+        "每次运行自动换随机种子；提示词请直接在云端工作流里改好，\n"
+        "或用 node_overrides 手写参数映射（改尺寸 / 步数等）。"
     )
 
     @classmethod
@@ -675,6 +910,7 @@ class RunningHubLatentGeneratorSimple:
         self,
         api_key: str,
         workflow_id: str,
+        node_overrides: Any,
         unique_id: Any = None,
     ) -> Tuple[Dict[str, torch.Tensor], str, str]:
         api_key = _resolve_api_key(api_key)
@@ -694,25 +930,59 @@ class RunningHubLatentGeneratorSimple:
         effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF)
         warnings: List[str] = []
 
+        overrides = _normalize_overrides(node_overrides)
+        # 极简版没有提示词输入框：映射里引用 {positive}/{negative} 会被替换成空串，
+        # 等于静默失效，必须在这里拦住而不是等云端跑完才发现问题。
+        raw_overrides_json = json.dumps(overrides, ensure_ascii=False)
+        for token, label in (("positive", "正面提示词"), ("negative", "负面提示词")):
+            if "{" + token + "}" in raw_overrides_json:
+                raise RHUserError(
+                    f"极简版没有{label}输入框，参数映射里不能引用 {{{token}}} 占位符"
+                    "（它会被替换成空字符串，等于什么都没注入）。\n"
+                    "两种改法任选其一：\n"
+                    "  1. 在映射里直接写死文本，例如 "
+                    '{"nodeId": "<ID>", "fieldName": "text", "fieldValue": "1 girl"}；\n'
+                    "  2. 改用「专业版」节点，它有正面/负面提示词输入框，支持 {"
+                    + token
+                    + "} 占位符。"
+                )
+        resolved_overrides = _apply_placeholders(overrides, {"seed": effective_seed})
+
         injections, _structure, _stats, seed_targets = _auto_injections(
             client, workflow_id, "", "", effective_seed
         )
+        node_info_list = _merge_injections(injections, resolved_overrides)
+
         if not _structure:
             _warn_missing_structure(warnings)
-        elif not seed_targets:
-            warnings.append(
-                "云端工作流里没找到可注入的随机种子字段，本次沿用云端默认种子"
-                "（可能重复出同一张图）。如需固定/指定种子，请改用「专业版」。"
+        else:
+            # 映射写错会在提交时被平台 803 整包拒绝，这里先本地逐条体检，
+            # 能省一次「跑完才知道错了」的往返。
+            warnings.extend(wf_mod.validate_injections(_structure, node_info_list))
+            # 极简版没有提示词输入框：云端一旦写了占位符，本次就会被替换成空内容。
+            # 这是本节点唯一可能「悄无声息毁掉云端提示词」的路径，必须显式说出来。
+            _warn_empty_prompt_vs_placeholder(
+                _structure,
+                "",
+                "",
+                "极简版没有提示词输入框：请改用「专业版」填提示词，"
+                "或在参数映射里把该节点的文本直接写死。",
+                warnings,
             )
-        elif len(seed_targets) > 1:
-            warnings.append(
-                f"云端检测到 {len(seed_targets)} 个采样器，已统一注入同一个随机种子。"
-            )
+            if not seed_targets:
+                warnings.append(
+                    "云端工作流里没找到可注入的随机种子字段，本次沿用云端默认种子"
+                    "（可能重复出同一张图）。如需固定/指定种子，请在参数映射里手动加 seed 字段。"
+                )
+            elif len(seed_targets) > 1:
+                warnings.append(
+                    f"云端检测到 {len(seed_targets)} 个采样器，已统一注入同一个随机种子。"
+                )
 
         result, task_id, lines = _run_sampling(
             client,
             workflow_id,
-            injections,
+            node_info_list,
             effective_seed,
             timeout,
             poll_interval,
@@ -720,6 +990,7 @@ class RunningHubLatentGeneratorSimple:
             use_high_performance,
             warnings,
             unique_id,
+            structure=_structure,
         )
         return (result, task_id, "\n".join(lines))
 
@@ -730,7 +1001,7 @@ class RunningHubLatentGeneratorSimple:
 
 
 class RunningHubLatentGenerator:
-    """面向需要精细调参的用户：支持完整 nodeInfoList 参数映射。
+    """面向需要精细调参的用户：本地提示词输入框 + 完整 nodeInfoList 参数映射。
 
     注册名保持 RunningHubLatentGenerator 不变——改名会让用户已保存的工作流
     全部断线，代价远大于显示名那点好处。
@@ -853,14 +1124,16 @@ class RunningHubLatentGenerator:
 
         effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF) if seed < 0 else int(seed)
         overrides = _normalize_overrides(node_overrides)
+        # 判「映射里有没有指定提示词落点」必须看**替换前**的原文：
+        # 用户写的是 "{positive}"，替换后已经变成提示词文本，再查就永远查不到。
+        raw_overrides_json = json.dumps(overrides, ensure_ascii=False)
         resolved_overrides = _apply_placeholders(
             overrides, {"seed": effective_seed, "positive": positive, "negative": negative}
         )
-        overrides_json = json.dumps(resolved_overrides, ensure_ascii=False)
 
         warnings: List[str] = []
 
-        # 第一步：自动注入（与极简版同一套全局替换逻辑）
+        # 第一步：自动注入（与极简版同一套占位符替换逻辑）
         injections, structure, stats, seed_targets = _auto_injections(
             client, workflow_id, positive, negative, effective_seed
         )
@@ -870,22 +1143,11 @@ class RunningHubLatentGenerator:
         # 第二步：手工映射叠加在自动注入之上，同字段以手工映射为准
         node_info_list = _merge_injections(injections, resolved_overrides)
 
-        # 提示词红线：填了提示词，但自动替换（含连线兜底）没命中、手工映射也没引用 → 明确警告
-        for token, label in (("positive", "正面提示词"), ("negative", "负面提示词")):
-            supplied = bool((positive if token == "positive" else negative).strip())
-            handled_manually = "{" + token + "}" in overrides_json
-            if supplied and stats.get(token, 0) == 0 and not handled_manually:
-                reason = wf_mod.prompt_link_diagnosis(structure, token)
-                node_count = len(structure) if structure else 0
-                warnings.append(
-                    f"{label}已填写，但没能注入云端。定位结果：{reason}"
-                    f"（云端结构共读到 {node_count} 个节点）。\n"
-                    "最可靠的修法是在参数映射里直接指定文本节点：\n"
-                    f'  {{"nodeId": "文本节点ID", "fieldName": "text", '
-                    f'"fieldValue": "{{{token}}}"}}\n'
-                    "文本节点 ID 可在 RunningHub 网页编辑器里看到，"
-                    "或运行「RH 工作流参数探查」确认云端返回了哪些节点。"
-                )
+        # 提示词红线：填了提示词，但云端没有占位符、映射里也没指定落点 → **报错**
+        # （自动沿连线猜测落点的能力已推倒，继续跑就是静默失效）
+        _require_prompt_targets(
+            structure, stats, positive, negative, raw_overrides_json
+        )
 
         # 种子：自动定位没找到、手工映射也没管 → 提示会重复出图
         overrides_touch_seed = any(
@@ -902,19 +1164,15 @@ class RunningHubLatentGenerator:
             )
 
         # 空提示词 + 云端有占位符 = 会把云端提示词换成空内容，必须说出来
-        hits = wf_mod.placeholder_hits(structure) if structure else {"positive": 0, "negative": 0}
-        for token, label, value in (
-            ("positive", "正面提示词", positive),
-            ("negative", "负面提示词", negative),
-        ):
-            if not str(value or "").strip() and hits.get(token, 0) > 0:
-                warnings.append(
-                    f"{label}是空的，但云端工作流里有 {hits[token]} 处 {{{token}}} 标记，"
-                    "本次会把云端提示词替换为空内容（画面对不上却没有任何报错，就是这个原因）。\n"
-                    "如果你在提示词输入框前面接了文本处理节点：请确认上游节点确实输出了内容，"
-                    "并且接的是它的文本输出口而不是 help/说明类输出口；"
-                    "注意输入框一旦连上节点，框里手写的文字就不再生效，值完全由连线决定。"
-                )
+        _warn_empty_prompt_vs_placeholder(
+            structure,
+            positive,
+            negative,
+            "如果你在提示词输入框前面接了文本处理节点：请确认上游节点确实输出了内容，"
+            "并且接的是它的文本输出口而不是 help/说明类输出口；"
+            "注意输入框一旦连上节点，框里手写的文字就不再生效，值完全由连线决定。",
+            warnings,
+        )
 
         # 映射合法性校验：结构已经在自动注入时拉过一次，直接复用，不再多打一次接口
         if validate_mapping and resolved_overrides and structure:
@@ -931,6 +1189,7 @@ class RunningHubLatentGenerator:
             use_high_performance,
             warnings,
             unique_id,
+            structure=structure,
         )
         # 回显真正送进云端的提示词——排查「提示词不生效」最快的一眼定位点
         previews: List[str] = []
@@ -1090,14 +1349,24 @@ class RunningHubWorkflowInspector:
             )
 
         body = wf_mod.describe(structure)
+        templates = wf_mod.mapping_templates(structure)
         lines = [
             f"工作流 {workflow_id} 的可修改参数清单：",
-            "（把需要的 nodeId / fieldName 抄进专业版的参数映射即可）",
+            "（把需要的 nodeId / fieldName 抄进参数映射即可）",
             "",
             body,
-            "",
-            "── 自动定位检查 ──",
         ]
+        if templates:
+            lines.extend(
+                [
+                    "",
+                    "── 可直接复制的参数映射片段 ──",
+                    "（复制进参数映射框，只改 fieldValue；标 × 的是连线字段，不能注入）",
+                    "",
+                    templates,
+                ]
+            )
+        lines.extend(["", "── 自动定位检查 ──"])
 
         # 直接告诉用户：这条工作流能不能被极简版零配置使用
         injections, stats = wf_mod.build_prompt_injections(structure, "X", "X")
@@ -1107,11 +1376,11 @@ class RunningHubWorkflowInspector:
             f"{{negative}} 命中 {stats['negative']} 处"
         )
         if stats["positive"] or stats["negative"]:
-            lines.append("  → 极简版可以自动注入提示词。")
+            lines.append("  → 本插件会自动替换这些占位符（提示词无需手写落点）。")
         else:
             lines.append(
-                "  → 极简版无法自动注入提示词：请在云端文本节点的文本框里写上 "
-                "{positive} / {negative} 标记，或改用专业版手动指定 nodeId。"
+                "  → 提示词没有自动落点：本节点不沿连线猜测，请在云端文本节点的文本框里"
+                "写上 {positive} / {negative} 标记，或在参数映射里手动指定 nodeId。"
             )
         lines.append(
             f"随机种子：命中 {len(seeds)} 个可注入字段"

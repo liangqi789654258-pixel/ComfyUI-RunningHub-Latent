@@ -1,30 +1,18 @@
 {
   "case_id": "c5-derived-value",
   "diagnosis": {
-    "negative": "nodeId=7 的 text 由上游连线（nodeId=62）接管，本插件无法就地覆盖，且上游也找不到唯一的文本字段",
-    "positive": "nodeId=6 的 text 由上游连线（nodeId=60）接管，本插件无法就地覆盖，且上游也找不到唯一的文本字段"
+    "negative": "云端结构共读到 14 个节点，但没有一处 {negative} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=61 [PrimitiveString] 「正提示词源」.value、nodeId=63 [PrimitiveString] 「负提示词源」.value。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{negative}\"}；也可以直接在云端文本节点的文本框里写上 {negative} 标记，本节点会自动替换。",
+    "positive": "云端结构共读到 14 个节点，但没有一处 {positive} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=61 [PrimitiveString] 「正提示词源」.value、nodeId=63 [PrimitiveString] 「负提示词源」.value。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{positive}\"}；也可以直接在云端文本节点的文本框里写上 {positive} 标记，本节点会自动替换。"
   },
   "expect_current": {
-    "status": "injected_suspect",
-    "violation": "§3.5 唯一即默认采用",
-    "why": "兜底路径沿操作数上溯，遇到「上游只有一个字符串字段」就认定唯一并直接采用 —— 这正是架构文档 §3.5 唯一即默认采用 明令禁止的拓扑假设；本例因此落到派生节点 TextTransform 的模板前缀 prefix（nodeId 60 / 62），而非人工判断的叶子字面量（61 / 63 的 value），且实现不会标注「间接绑定」；标量端口（steps / cfg）为派生连线，完全没有解析器。"
+    "status": "regression_open",
+    "why": "推倒连线兜底后本形态 0 命中、0 注入：本例的提示词落在派生节点链末端的字面量（61 / 63 的 value），只有靠「上游只有一个字符串字段即认定唯一」的拓扑假设才能到达 —— 该假设已被推倒（架构文档 §3.5 禁止，旧实现正是靠它错打到模板前缀 prefix（nodeId 60 / 62））。现在由上层在用户填了提示词时转为明确报错；标量端口（steps / cfg）为派生连线，依然没有解析器。"
   },
   "hit_stats": {
-    "negative": 1,
-    "positive": 1
+    "negative": 0,
+    "positive": 0
   },
-  "injections": [
-    {
-      "fieldName": "prefix",
-      "fieldValue": "<<POS_SENTINEL>>",
-      "nodeId": "60"
-    },
-    {
-      "fieldName": "prefix",
-      "fieldValue": "<<NEG_SENTINEL>>",
-      "nodeId": "62"
-    }
-  ],
+  "injections": [],
   "link_field_count": 17,
   "node_count": 14,
   "placeholder_hits": {

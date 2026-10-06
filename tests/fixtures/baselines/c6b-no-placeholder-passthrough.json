@@ -1,12 +1,12 @@
 {
   "case_id": "c6b-no-placeholder-passthrough",
   "diagnosis": {
-    "negative": "连线目标 nodeId=20 没有 text 字段（class_type=ImageToVideoConditioning），无法作为提示词落点",
-    "positive": "连线目标 nodeId=20 没有 text 字段（class_type=ImageToVideoConditioning），无法作为提示词落点"
+    "negative": "云端结构共读到 10 个节点，但没有一处 {negative} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=6 [CLIPTextEncode] 「正面提示词」.text、nodeId=7 [CLIPTextEncode] 「负面提示词」.text。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{negative}\"}；也可以直接在云端文本节点的文本框里写上 {negative} 标记，本节点会自动替换。",
+    "positive": "云端结构共读到 10 个节点，但没有一处 {positive} 占位符，本节点不会沿连线猜测落点。请在参数映射里手工指定：nodeId=6 [CLIPTextEncode] 「正面提示词」.text、nodeId=7 [CLIPTextEncode] 「负面提示词」.text。（以上是云端所有可写入的文本字段候选；请按节点标题和语义自行判断哪一个是提示词落点，选错会覆盖不该覆盖的内容，例如被多个分支共用的 lora 触发词节点。）复制后把 nodeId 换成你自己的：{\"nodeId\": \"<ID>\", \"fieldName\": \"text\", \"fieldValue\": \"{positive}\"}；也可以直接在云端文本节点的文本框里写上 {positive} 标记，本节点会自动替换。"
   },
   "expect_current": {
     "status": "regression_open",
-    "why": "占位符扫描 0 命中；兜底路径在两级采样器上取到的 positive/negative 连线源都是透传节点（无 text 字段），两处均放弃 → 整体 0 命中，且不产生任何诊断以外的提示。"
+    "why": "推倒连线兜底后结果形态与旧实现一致：没有占位符 → 0 命中、0 注入。区别在于旧实现还会尝试沿两级采样器的连线去找（透传节点无 text 字段而放弃），现在根本不尝试，诊断直接给出候选字面量字段并指引用户手写映射。"
   },
   "hit_stats": {
     "negative": 0,
