@@ -127,7 +127,7 @@ poll_interval = 5
 
 | 节点 | 用途 | 适合谁 |
 |------|------|--------|
-| **RH 云端采样 · 极简版** | 填 api_key + workflow_id 即用（`node_overrides` 留空）；种子每次自动随机 | 新手 / 云端调好直接出图 |
+| **RH 云端采样 · 极简版** | 只有 api_key + workflow_id 两个框，一切参数用云端的；种子每次自动随机 | 新手 / 云端调好直接出图 |
 | **RH 云端采样 · 专业版** | 自动注入提示词与种子 + `node_overrides` 完整参数映射 | 需要本地调 step / cfg / 尺寸 / 二采 denoise |
 | **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
 | **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
@@ -152,11 +152,12 @@ poll_interval = 5
 > 都不一样（文本节点前面接字符串拼接、通配符、透传节点的情况随处可见），
 > 按连线猜出来的落点一旦错了就是**静默失效**。因此没有占位符 = 没有自动落点：
 > 节点会**直接报错**并给出可复制的映射模板，而不是悄悄跑完。
-> 换句话说，除了占位符和种子，其余一切参数都请在 `node_overrides` 里手写。
+> 换句话说，除了占位符和种子，其余一切参数都请在专业版的 `node_overrides` 里手写。
 
-- **极简版**：把自动注入之外的一切都藏起来。没有提示词输入框（沿用云端文案）、
-  没有种子滑块（每次自动随机）、没有 timeout（走 config.ini）。
-  想改云端任何参数就填 `node_overrides`；想要固定种子或本地改提示词，换专业版。
+- **极简版**：把一切都藏起来——**只有 `api_key` + `workflow_id` 两个输入框，
+  没有任何参数映射入口**（一切参数都用云端的，本地只负责触发与解码）。
+  没有提示词输入框（沿用云端文案）、没有种子滑块（每次自动随机）、
+  没有 timeout（走 config.ini）。想改云端参数，换专业版。
 - **专业版**：自动注入照常生效，`positive` / `negative` 输入框可直接改提示词；
   再叠加 `node_overrides` 手工映射，**映射与自动注入冲突时以映射为准**：
 
@@ -174,10 +175,9 @@ poll_interval = 5
 | `api_key` | 留空则读 config.ini / config.json |
 | `workflow_id` | RunningHub 工作流 ID |
 
-**极简版**：除了上面两个（外加可选留空的 `node_overrides`）没有其他输入框。
+**极简版**：除了上面两个没有其他输入框（不提供 `node_overrides`）。
 timeout / poll_interval / use_cache / use_high_performance 全部走 config.ini（见下），
-不占画布。它的 `node_overrides` **不支持** `{positive}` / `{negative}` 占位符
-（本节点没有提示词输入框），只支持 `{seed}`。
+不占画布。要改云端任何参数请换「专业版」。
 
 **专业版独有**
 
@@ -363,19 +363,24 @@ VAE 解码（SDXL 的 latent 用 SD1.5 的 VAE 解码必崩）。参考云端工
 ```
 ComfyUI-RunningHub-Latent/
 ├── __init__.py            节点注册 + WEB_DIRECTORY
-├── nodes.py               5 个节点的 UI 定义与业务流程
+├── nodes.py               8 个节点的 UI 定义与业务流程
 ├── core/
 │   ├── client.py          RunningHub OpenAPI 封装（重试 / 错误映射 / 脱敏）
 │   ├── latent.py          latent 解析，对齐原生 LoadLatent
-│   ├── workflow.py        工作流结构解析 + 提示词全局替换 + 映射校验
-│   ├── snapshot.py        S2 发现层：工作流结构化快照（字段形态 / 执行态 / 指纹 / diff）
+│   ├── workflow.py        工作流结构解析 + 占位符替换 + 映射校验
+│   ├── snapshot.py        S2 快照模型（字段形态 / 执行态 / 指纹 / diff）
+│   │                      ⚠ 未接入运行时：为「自动推断」路线打的地基，当前手动映射路线不消费
+│   ├── binding.py         S3 显式绑定 + 漂移检测
+│   │                      ⚠ 未接入运行时：纯库（见 docs/binding-r1.md），节点层尚未使用
 │   ├── cache.py           按参数哈希的本地 latent 缓存
 │   └── settings.py        config.ini / config.json 读取
 ├── web/
 │   └── rh_warning.js      前端扩展：警告时给节点上色、拉高提示词输入框
 ├── tests/
-│   ├── test_core.py       核心逻辑冒烟测试（104 项，不需要 API Key）
+│   ├── test_core.py       核心逻辑冒烟测试（177 项，不需要 API Key）
 │   ├── test_snapshot.py   发现层快照模型自测（101 项，不需要 torch / API Key）
+│   ├── test_binding.py    显式绑定与漂移检测自测（134 项）
+│   ├── test_s0_fixtures.py 九类形态 fixture 回归测试（693 项）
 │   └── test_package.py    交付物一致性检查（节点定义 vs 示例工作流）
 ├── examples/              4 份示例工作流（极简 / 专业 / 视频 / 二采）
 ├── config.example.ini

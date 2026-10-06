@@ -4,9 +4,9 @@ ComfyUI 节点定义。
 ## 两个核心版本怎么选
 
 * **极简版**（RH 云端采样 · 极简版）
-  填 api_key 和 workflow_id 就能出图，第三个 `node_overrides` 留空即可。
-  提示词完全沿用云端默认文案，种子每次执行自动随机；其余参数走 config.ini。
-  想改云端任何参数就在 `node_overrides` 里手写（不支持 {positive}/{negative}）。
+  只有 api_key 和 workflow_id 两个输入框：一切参数都用云端的，本地只负责
+  触发采样和解码。种子每次执行自动随机，其余走 config.ini。
+  要改云端任何参数请换「专业版」，极简版没有参数映射入口。
 
 * **专业版**（RH 云端采样 · 专业版）
   在极简版同一套自动注入之外，额外暴露 nodeInfoList 参数映射，
@@ -24,7 +24,8 @@ RunningHub 的参数注入接口要求必须给出 nodeId：
    seed 字段注入种子。因为不依赖具体的 class_type，能兼容任意结构的工作流。
    种子语义明确，多采样器统一注入同一个 seed 是我们要的行为，因此保留。
 
-2. **参数映射（手动，`node_overrides`）**：两个版本节点都有这个框。
+2. **参数映射（手动，`node_overrides`）**：只有「专业版」有这个框；
+   极简版按契约不提供映射入口。
 
 曾经存在一条「沿采样器 positive/negative 连线向上游回溯找文本字段」的兜底通道，
 **已推倒**：图像大小设置和提示词的接法每条工作流都不一样，猜出来的落点一旦错了
@@ -827,10 +828,10 @@ class RunningHubLatentGeneratorSimple:
       * timeout / poll_interval / use_cache 等参数不做成 widget，
         全部走 config.ini 的全局配置，想调的高级用户去配置文件里改。
 
-    为什么要多出 `node_overrides` 一个框（原本这里是只有两个输入框的极简契约）：
-    「图像大小设置和提示词应用每条工作流都不一样」，靠节点去猜必然猜错。
-    因此想改云端任何参数（尺寸 / 步数 / 提示词落点）都必须在这里手写映射——
-    宁可多一个框，也不要打一发静默失效的注入。
+    契约（用户拍板后定稿）：**只有 api_key / workflow_id 两个输入框**，不提供
+    任何参数映射入口——极简版的一切参数都用云端的，本地只负责触发采样和解码。
+    曾经短暂加过 `node_overrides` 框又移除：既然定位是极简版，要改参数
+    就该换「专业版」，多一个用不上的框反而是负担。
 
     红线依然成立：种子没能注入时在 report 里明确警告，不静默。
     """
@@ -858,29 +859,6 @@ class RunningHubLatentGeneratorSimple:
                                    "留空则读取配置文件里的 default_workflow_id。",
                     },
                 ),
-                "node_overrides": (
-                    "STRING",
-                    {
-                        "multiline": True,
-                        "default": "",
-                        "placeholder": "advanced：参数映射 JSON（可选，留空即可。悬停查看格式）",
-                        "tooltip": (
-                            "【改云端参数时才需要填】留空 = 完全使用云端默认值。\n"
-                            "\n"
-                            "本节点不会替你猜测提示词或尺寸的落点——每条工作流的接法都不一样，\n"
-                            "猜错就是静默失效。要改就必须在这里手写清楚。\n"
-                            "\n"
-                            "格式（整个是 JSON 数组）：\n"
-                            '[{"nodeId": "3", "fieldName": "steps", "fieldValue": 30}]\n'
-                            "\n"
-                            "  * nodeId / fieldName：用「RH 工作流参数探查」节点查（它会直接给出可复制的片段）；\n"
-                            "  * fieldValue：直接写值；可写 {seed} 占位符绑定到本次随机种子；\n"
-                            "    本节点没有提示词输入框，因此**不支持** {positive} / {negative}；\n"
-                            "  * 连线字段（探查结果里标 × 的）不能注入；\n"
-                            "  * 想改提示词请改用「专业版」节点。"
-                        ),
-                    },
-                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -891,9 +869,9 @@ class RunningHubLatentGeneratorSimple:
     CATEGORY = CATEGORY
     TITLE = "RH 云端采样 · 极简版"
     DESCRIPTION = (
-        "只填 API Key 和工作流 ID，其余全部沿用云端默认值。\n"
-        "每次运行自动换随机种子；提示词请直接在云端工作流里改好，\n"
-        "或用 node_overrides 手写参数映射（改尺寸 / 步数等）。"
+        "只填 API Key 和工作流 ID 两个框，其余全部沿用云端默认值。\n"
+        "每次运行自动换随机种子；提示词、尺寸等一切参数都在云端工作流里改好，\n"
+        "本地只负责触发采样与解码。要改云端参数请用「专业版」节点。"
     )
 
     @classmethod
@@ -910,7 +888,6 @@ class RunningHubLatentGeneratorSimple:
         self,
         api_key: str,
         workflow_id: str,
-        node_overrides: Any,
         unique_id: Any = None,
     ) -> Tuple[Dict[str, torch.Tensor], str, str]:
         api_key = _resolve_api_key(api_key)
@@ -930,23 +907,9 @@ class RunningHubLatentGeneratorSimple:
         effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF)
         warnings: List[str] = []
 
-        overrides = _normalize_overrides(node_overrides)
-        # 极简版没有提示词输入框：映射里引用 {positive}/{negative} 会被替换成空串，
-        # 等于静默失效，必须在这里拦住而不是等云端跑完才发现问题。
-        raw_overrides_json = json.dumps(overrides, ensure_ascii=False)
-        for token, label in (("positive", "正面提示词"), ("negative", "负面提示词")):
-            if "{" + token + "}" in raw_overrides_json:
-                raise RHUserError(
-                    f"极简版没有{label}输入框，参数映射里不能引用 {{{token}}} 占位符"
-                    "（它会被替换成空字符串，等于什么都没注入）。\n"
-                    "两种改法任选其一：\n"
-                    "  1. 在映射里直接写死文本，例如 "
-                    '{"nodeId": "<ID>", "fieldName": "text", "fieldValue": "1 girl"}；\n'
-                    "  2. 改用「专业版」节点，它有正面/负面提示词输入框，支持 {"
-                    + token
-                    + "} 占位符。"
-                )
-        resolved_overrides = _apply_placeholders(overrides, {"seed": effective_seed})
+        # 极简版契约：不提供参数映射入口，一切参数用云端的，本地只负责触发与解码。
+        # 要改云端参数请换「专业版」（它有 node_overrides 映射框）。
+        resolved_overrides: List[Dict[str, Any]] = []
 
         injections, _structure, _stats, seed_targets = _auto_injections(
             client, workflow_id, "", "", effective_seed

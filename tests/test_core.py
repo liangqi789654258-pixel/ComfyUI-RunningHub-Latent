@@ -546,24 +546,15 @@ it = Simple.INPUT_TYPES()
 req = it["required"]
 check("极简版含字段 api_key", "api_key" in req)
 check("极简版含字段 workflow_id", "workflow_id" in req)
-# 契约变更（用户已拍板）：极简版多出 node_overrides 一个框。
-# 「图像大小设置和提示词应用每条工作流都不一样」，靠节点猜必然猜错；
-# 想改云端任何参数都必须手写映射。原先「只有两个输入框」的断言因此反转。
+# 契约最终定稿（用户二次拍板）：极简版回到「只有两个输入框」，且**没有**
+# 参数映射入口——一切参数都用云端的，本地只负责触发与解码。
+# node_overrides 短暂加入后移除：极简版要改参数就该换专业版。
 check(
-    "极简版只有这三个输入框（api_key / workflow_id / node_overrides）",
-    set(req.keys()) == {"api_key", "workflow_id", "node_overrides"},
+    "极简版只有这两个输入框（api_key / workflow_id）",
+    set(req.keys()) == {"api_key", "workflow_id"},
     f"实际字段：{sorted(req.keys())}",
 )
-check("极简版含 node_overrides（纯手动契约）", "node_overrides" in req)
-check(
-    "极简版 node_overrides 是多行文本（与专业版同规格）",
-    req["node_overrides"][0] == "STRING" and req["node_overrides"][1].get("multiline") is True,
-)
-check(
-    "极简版 node_overrides 带中文悬停说明且不承诺自动定位",
-    "nodeId" in req["node_overrides"][1].get("tooltip", "")
-    and "不会" in req["node_overrides"][1].get("tooltip", ""),
-)
+check("极简版不含 node_overrides（映射入口只属于专业版）", "node_overrides" not in req)
 check("极简版声明了 hidden unique_id（用于前端上色）",
       it.get("hidden", {}).get("unique_id") == "UNIQUE_ID")
 check("极简版显示名为中文", getattr(Simple, "TITLE", "").startswith("RH 云端采样"))
