@@ -1,9 +1,11 @@
 """GUI 离屏构建测试：不开窗口，验证 MainWindow 能完整构造、预设/画廊/VAE 列表加载。"""
 
+import faulthandler
 import os
 import sys
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+faulthandler.enable()  # 段错误时打印 Python 栈
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -46,3 +48,8 @@ print("[OK] 视频解码组已去掉勾选框")
 win.btn_video_mode.setChecked(True)  # 复原默认（视频模式）
 win.close()
 print("GUI 离屏测试通过")
+
+# 收尾：退出事件循环再让解释器退出，避免 QThread/QApplication
+# 在解释器销毁阶段被回收（Linux 上表现为退出码 139）
+app.quit()
+sys.stdout.flush()

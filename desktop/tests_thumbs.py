@@ -4,10 +4,15 @@
 生成测试视频用本项目的 video.save_video（不依赖用户的真实产物）。
 """
 
+import faulthandler
 import os
 import sys
 import tempfile
 import time
+
+# CI（headless Linux）上曾以退出码 139（SIGSEGV）挂掉且没有任何 traceback，
+# 打开这个才能在段错误时打印 Python 栈。
+faulthandler.enable()
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -161,6 +166,13 @@ while time.time() < deadline:
 assert img_item.icon().cacheKey() != placeholder_key, "图片缩略图未回填"
 print("[OK] 图片缩略图后台回填正常")
 
+# 收尾顺序很重要：先停线程 → 关窗口 → 退出事件循环，
+# 任何一步漏掉都可能让 QThread 在解释器退出阶段被回收而崩掉
 win._stop_thumb_worker(wait_ms=5000)
 win.close()
+for _ in range(20):
+    app.processEvents()
+    time.sleep(0.01)
+app.quit()
+sys.stdout.flush()
 print("视频缩略图测试全部通过")

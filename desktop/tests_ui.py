@@ -4,6 +4,8 @@
 比如成本护栏超限时必须真的拦（返回 False），而不是弹个框就继续跑。
 """
 
+import faulthandler
+faulthandler.enable()
 import os
 import sys
 import time
@@ -212,3 +214,9 @@ if failures:
     print(f"界面功能测试失败 {len(failures)} 项：{[n for n, _ in failures]}")
     sys.exit(1)
 print("界面功能测试全部通过")
+
+# 收尾：同上，确保没有残留窗口/线程在解释器退出时被回收
+for _w in QApplication.topLevelWidgets():
+    _w.close()
+app.quit()
+sys.stdout.flush()
