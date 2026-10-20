@@ -86,49 +86,81 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: python tests_i18n.py
+        run: |
+          set +e
+          python tests_i18n.py 2>&1 | tee /tmp/out_1.txt
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            { echo '```'; tail -50 /tmp/out_1.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $code
 
-      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
-      # 不用登录也能从公开的 job steps 里读到结论
       - name: 2. tests_ui.py
         working-directory: desktop
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: python tests_ui.py
+        run: |
+          set +e
+          python tests_ui.py 2>&1 | tee /tmp/out_2.txt
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            { echo '```'; tail -50 /tmp/out_2.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $code
 
-      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
-      # 不用登录也能从公开的 job steps 里读到结论
       - name: 3. tests_runner.py
         working-directory: desktop
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: python tests_runner.py
+        run: |
+          set +e
+          python tests_runner.py 2>&1 | tee /tmp/out_3.txt
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            { echo '```'; tail -50 /tmp/out_3.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $code
 
-      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
-      # 不用登录也能从公开的 job steps 里读到结论
       - name: 4. tests_embed.py
         working-directory: desktop
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: python tests_embed.py
+        run: |
+          set +e
+          python tests_embed.py 2>&1 | tee /tmp/out_4.txt
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            { echo '```'; tail -50 /tmp/out_4.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $code
 
-      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
-      # 不用登录也能从公开的 job steps 里读到结论
       - name: 5. tests_thumbs.py
         working-directory: desktop
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: python tests_thumbs.py
+        run: |
+          set +e
+          python tests_thumbs.py 2>&1 | tee /tmp/out_5.txt
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            { echo '```'; tail -50 /tmp/out_5.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $code
 
-      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
-      # 不用登录也能从公开的 job steps 里读到结论
       - name: 6. tests_gui_offscreen.py
         working-directory: desktop
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: python tests_gui_offscreen.py
+        run: |
+          set +e
+          python tests_gui_offscreen.py 2>&1 | tee /tmp/out_6.txt
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            { echo '```'; tail -50 /tmp/out_6.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $code
