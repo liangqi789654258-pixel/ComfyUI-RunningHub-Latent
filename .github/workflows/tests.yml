@@ -79,15 +79,56 @@ jobs:
           print('PySide6', PySide6.__version__, '| offscreen OK')
           "
 
-      - name: Portable suites
+      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
+      # 不用登录也能从公开的 job steps 里读到结论
+      - name: 1. tests_i18n.py
+        working-directory: desktop
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
-        run: |
-          set -e
-          cd desktop
-          for f in tests_i18n.py tests_ui.py tests_runner.py tests_embed.py \
-                   tests_thumbs.py tests_gui_offscreen.py; do
-            echo "===== $f ====="
-            python "$f"
-          done
+        run: python tests_i18n.py
+
+      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
+      # 不用登录也能从公开的 job steps 里读到结论
+      - name: 2. tests_ui.py
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CUDA_VISIBLE_DEVICES: ""
+        run: python tests_ui.py
+
+      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
+      # 不用登录也能从公开的 job steps 里读到结论
+      - name: 3. tests_runner.py
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CUDA_VISIBLE_DEVICES: ""
+        run: python tests_runner.py
+
+      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
+      # 不用登录也能从公开的 job steps 里读到结论
+      - name: 4. tests_embed.py
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CUDA_VISIBLE_DEVICES: ""
+        run: python tests_embed.py
+
+      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
+      # 不用登录也能从公开的 job steps 里读到结论
+      - name: 5. tests_thumbs.py
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CUDA_VISIBLE_DEVICES: ""
+        run: python tests_thumbs.py
+
+      # 每个套件一个独立步骤：失败时在 Actions 页面直接看到是哪个文件，
+      # 不用登录也能从公开的 job steps 里读到结论
+      - name: 6. tests_gui_offscreen.py
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CUDA_VISIBLE_DEVICES: ""
+        run: python tests_gui_offscreen.py
