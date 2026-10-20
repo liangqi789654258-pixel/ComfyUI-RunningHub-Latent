@@ -49,20 +49,26 @@ def t_selfcheck_shape():
             assert c.fix, f"{c.key} 失败却没给修复建议"
 
 
-def t_selfcheck_runs_on_this_machine():
-    """除了「没配 Key」，其余阻塞项都必须通过——否则说明路径/依赖探测有问题。
+def t_selfcheck_structure():
+    """自检必须能跑、能给修复建议。
 
-    为什么不把 Key 也算进去：从全新副本跑测试时本来就没有 Key，
-    那正是自检该报的项，不能因此判测试失败。
+    注意**不要**断言「全部通过」：CI 机器上没有 ComfyUI、没有 VAE 模型，
+    那正是自检该报的项，不是 bug。真正要守住的是两条：
+      1. 任何失败项都必须带修复建议（否则用户看到红叉不知道怎么办）；
+      2. 仓库布局下的插件目录探测必须成功——desktop/ 就在插件仓库里，
+         这一项要是都探不到，说明路径推导逻辑写错了。
     """
-    bad = [c for c in selfcheck.blocking(selfcheck.run_checks())
-           if c.key != "sc_api_key"]
-    assert not bad, "环境探测误报：" + "、".join(f"{c.key}({c.detail})" for c in bad)
+    checks = selfcheck.run_checks()
+    assert len(checks) == 6, f"检查项数量异常：{len(checks)}"
+    for c in checks:
+        if not c.ok:
+            assert c.fix, f"{c.key} 判定失败却没给修复建议"
+    plugin = next(c for c in checks if c.key == "sc_plugin")
+    assert plugin.ok, f"插件目录探测失败：{plugin.detail}"
 
 
 def t_selfcheck_dialog_builds():
-    checks = selfcheck.run_checks()
-    dlg = SelfCheckDialog(checks)
+    dlg = SelfCheckDialog(selfcheck.run_checks())
     assert dlg.windowTitle()
     assert dlg.btn_settings.text() and dlg.btn_later.text()
     dlg.close()
@@ -189,7 +195,7 @@ def t_import_key_reads_plugin_config():
 
 for name, fn in [
     ("自检项结构与修复建议", t_selfcheck_shape),
-    ("本机自检无阻塞项", t_selfcheck_runs_on_this_machine),
+    ("自检结构与本仓库布局探测", t_selfcheck_structure),
     ("自检对话框可构建", t_selfcheck_dialog_builds),
     ("今日积分统计", t_today_coins),
     ("台账对话框可构建", t_ledger_dialog_builds),
