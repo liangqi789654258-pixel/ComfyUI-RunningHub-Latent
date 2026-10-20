@@ -2,6 +2,37 @@
 
 本项目所有值得记录的变更都会写在这里，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [1.5.1] - 2026-10-20 - 首次上线 CI 后抓到的修复
+
+> 1.5.0 发布后接上 GitHub Actions，第一次跑就红了三个 job。
+> 下面这些是真 bug，不是测试写错——尤其第一条会影响所有干净环境的用户。
+
+### 修复
+
+- **桌面端漏声明 Pillow 依赖**（会影响真实用户）。
+  `desktop/app/engine/embed.py` 写 PNG tEXt 元数据、`runner` 保存帧都 `import PIL`，
+  但 `requirements.txt` 里没有 Pillow。Windows 上因为 ComfyUI 环境自带 Pillow，
+  这个问题一直没暴露；**任何干净环境（Linux/macOS/精简 venv）一保存就
+  `No module named 'PIL'`**。已补 `Pillow>=10.0`。
+- `tests/test_keyvault.py` 里 `test_resolve_api_key_ignores_label` 注释写着
+  「用临时配置文件」，实际读的是真实 `config.ini`——只在作者机器上通过。
+  改为打桩，与机器无关。
+- `tests_ui.py` 的自检断言要求「本机装好 ComfyUI + VAE 模型」，CI 上不可能满足。
+  改为只守两条真不变量：失败项必须带修复建议、仓库布局下插件目录必须能探到。
+
+### 改进（测试稳定性）
+
+- 三个 Qt 相关套件加 `faulthandler` 与显式收尾
+  （停线程 → 关窗口 → processEvents → `app.quit()`）。
+  headless Linux 上曾出现退出码 139（SIGSEGV）且无 traceback，现在能打出栈。
+- 测试脚本去掉硬编码的 `C://AI//dongshan//...` 路径，任何机器 clone 下来都能跑。
+- 每个测试文件独立成 CI 步骤，失败点无需登录即可定位。
+
+### 工程
+
+- CI 失败时用 `::error::` annotation 输出尾部日志——公开仓库无需凭据即可排障。
+- `.gitignore` 补上本地排障用的临时抓取文件。
+
 ## [1.5.0] - 2026-10-20 - 桌面出图器可用性补齐 + CI
 
 > 插件本身没有破坏性变更；这一版主要是把 `desktop/` 从「能出图」推到「敢给别人用」。

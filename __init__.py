@@ -162,4 +162,4 @@ def _install_prompt_key_guard():
 _install_prompt_key_guard()
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
-__version__ = "1.5.0"
+__version__ = "1.5.1"
