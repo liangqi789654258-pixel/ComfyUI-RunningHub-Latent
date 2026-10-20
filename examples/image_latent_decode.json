@@ -1,0 +1,220 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "RunningHubLatentGenerator",
+      "pos": [
+        60,
+        60
+      ],
+      "size": [
+        480,
+        470
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "task_id",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RunningHubLatentGenerator"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "[\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{positive}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"text\",\n    \"fieldValue\": \"{negative}\"\n  },\n  {\n    \"nodeId\": \"这里填云端 nodeId\",\n    \"fieldName\": \"seed\",\n    \"fieldValue\": \"{seed}\"\n  }\n]",
+        "masterpiece, best quality, 1girl, upper body",
+        "lowres, bad anatomy, watermark",
+        0,
+        600,
+        1,
+        5.0,
+        true,
+        false,
+        true
+      ],
+      "title": "RH 云端采样 · 专业版"
+    },
+    {
+      "id": 2,
+      "type": "VAELoader",
+      "pos": [
+        60,
+        580
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            2
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "ae.safetensors"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "VAEDecodeTiled",
+      "pos": [
+        600,
+        120
+      ],
+      "size": [
+        280,
+        130
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 1
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            3
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecodeTiled"
+      },
+      "widgets_values": [
+        512,
+        64
+      ]
+    },
+    {
+      "id": 4,
+      "type": "SaveImage",
+      "pos": [
+        940,
+        120
+      ],
+      "size": [
+        280,
+        280
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "RH_Latent"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "Note",
+      "pos": [
+        60,
+        690
+      ],
+      "size": [
+        640,
+        320
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "Note"
+      },
+      "widgets_values": [
+        "【专业版 · 精细调参】\nnode_overrides 里可以改写云端任意节点的任意字段，\n值里写 {positive} / {negative} / {seed} 就会绑定到左边对应输入框。\n\n不知道 nodeId？拖一个「RH 工作流参数探查」节点执行一下，\n它会把云端全部 nodeId 和 fieldName 列出来，直接抄即可。\n\nvalidate_mapping 打开后，nodeId / fieldName 写错会在 report 里给出明确提示，\n不会像以前那样静默失效。\n\n云端参数分层建议：模型、Lora、采样器类型放云端固定；\n提示词、种子、步数、CFG 放本地调。"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      0,
+      "LATENT"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      1,
+      "VAE"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

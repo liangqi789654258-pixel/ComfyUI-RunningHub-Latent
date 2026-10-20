@@ -1,0 +1,70 @@
+name: tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  plugin:
+    name: plugin (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      # torch CPU 版：test_core 需要，体积约 200MB，用官方 cpu 源装最快
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests safetensors numpy
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Core logic
+        run: python tests/test_core.py
+
+      - name: Errors / keyvault / fixtures / package
+        run: |
+          python tests/test_errors.py
+          python tests/test_keyvault.py
+          python tests/test_s0_fixtures.py
+          python tests/test_package.py
+
+  desktop:
+    name: desktop (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r desktop/requirements.txt
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0
+
+      # 这些用例全部离线：不需要 API Key，也不需要 VAE 模型
+      - name: Portable suites
+        env:
+          QT_QPA_PLATFORM: offscreen
+          CUDA_VISIBLE_DEVICES: ""
+        run: |
+          cd desktop
+          python tests_i18n.py
+          python tests_ui.py
+          python tests_runner.py
+          python tests_embed.py
+          python tests_thumbs.py
+          python tests_gui_offscreen.py

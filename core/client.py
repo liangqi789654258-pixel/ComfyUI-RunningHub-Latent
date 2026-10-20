@@ -31,6 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+from . import errors as errors_mod
+
 # --------------------------------------------------------------------------
 # 常量
 # --------------------------------------------------------------------------
@@ -46,24 +48,25 @@ CODE_FAILED = 805
 # 这个码必须单独认得出来——它是唯一能在提交前精确定位到「第几条映射错了」的信号。
 CODE_PARAM_INVALID = 803
 
-_TERMINAL_CODES = (CODE_SUCCESS, CODE_FAILED)
 
-# 状态码 -> 中文解释。未收录的码会回落到服务端原始 msg。
-_ERROR_HINTS: Dict[int, str] = {
-    803: (
-        "参数注入不合法：请确认 nodeId / fieldName 与云端工作流完全一致，"
-        "并且新值必须放在 fieldValue 字段（不是 value）。"
-        "可用「RH 工作流参数探查」节点拉取真实清单。"
-    ),
-    805: "云端工作流执行失败（详见下方云端报错）。",
-    813: "任务仍在队列排队中，云端算力繁忙，可稍后再试。",
-    804: "云端任务正在执行。",
-    412: "API Key 无效或已失效，请到 RunningHub 控制台重新生成。",
-    812: "鉴权失败：API Key 不正确、已过期，或该 Key 无权调用工作流 API。",
-    421: "并发任务数已达上限（消费级会员通常为 1），请等当前任务结束后重试。",
-    402: "余额不足，请充值后重试。",
-    400: "请求参数格式有误。",
+# 状态码 -> 中文解释已收敛到 errors.CODE_HINTS（文案唯一出口）。
+# 未收录的码会回落到服务端原始 msg。
+
+# 接口路径 -> 失败环节的人话描述。报错里必须写明卡在哪一次调用上，
+# 否则用户看到「调用失败」根本不知道是提交阶段还是轮询阶段出的问题。
+_PATH_STAGES: Dict[str, str] = {
+    "/task/openapi/create": "提交任务到云端（POST /task/openapi/create）",
+    "/task/openapi/outputs": "查询云端任务结果（POST /task/openapi/outputs）",
+    "/task/openapi/status": "查询云端任务状态（POST /task/openapi/status）",
+    "/task/openapi/upload": "上传输入文件到云端（POST /task/openapi/upload）",
+    "/api/openapi/getJsonApiFormat": "读取云端工作流结构（GET getJsonApiFormat）",
+    "/uc/openapi/accountStatus": "查询账户积分（POST /uc/openapi/accountStatus）",
 }
+
+
+def _emit_retry(path: str, attempt: int, total: int) -> None:
+    """重试留痕。等待期间界面上没有任何反馈最容易让人以为卡死了。"""
+    print(f"[RunningHub-Latent] 请求 {path} 第 {attempt} 次失败，准备重试（最多 {total} 次）")
 
 
 # --------------------------------------------------------------------------
@@ -71,16 +74,21 @@ _ERROR_HINTS: Dict[int, str] = {
 # --------------------------------------------------------------------------
 
 
-class RunningHubError(RuntimeError):
+class RunningHubError(errors_mod.RHUserError):
     """RunningHub 相关异常的基类。所有消息面向终端用户，必须是中文。
+
+    继承 `errors.RHUserError` 是为了让上层（nodes）能统一补上「节点名 /
+    失败环节」再重新渲染，用户看到的就是一份完整诊断而不是一句报错。
 
     `code` 是平台返回的业务码（拿不到时为 None）。带上它是为了让上层能
     针对特定错误码做精确定位——最典型的就是 803：平台只说「整包不合法」，
     而上层手里有工作流结构，可以逐条指出是哪一条映射错了。
     """
 
-    def __init__(self, message: str, code: Optional[int] = None) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, code: Optional[int] = None, **kwargs: Any) -> None:
+        if "category" not in kwargs:
+            kwargs["category"] = errors_mod.code_category(code)
+        super().__init__(message, **kwargs)
         self.code = code
 
 
@@ -98,7 +106,21 @@ class TaskFailedError(RunningHubError):
         self.traceback = traceback
         detail = exception_message or "未知错误"
         location = f"节点「{node_name}」" if node_name else "云端工作流"
-        super().__init__(f"{location}执行失败：{detail}")
+
+        context: Dict[str, Any] = {"云端报错原文": errors_mod.truncate(detail, 400)}
+        if node_name:
+            context["云端报错节点"] = node_name
+        # 完整堆栈太长，只留最后一行（通常就是那句真正的异常）
+        tail = [ln.strip() for ln in str(traceback or "").splitlines() if ln.strip()]
+        if tail:
+            context["云端堆栈末行"] = errors_mod.truncate(tail[-1], 300)
+
+        tmp = errors_mod.RHUserError.build(
+            errors_mod.CAT_CLOUD,
+            f"{location}执行失败：{errors_mod.truncate(detail, 200)}",
+            context=context,
+        )
+        super().__init__(str(tmp), category=tmp.category, parts=tmp.parts)
 
 
 class TaskTimeoutError(RunningHubError):
@@ -107,11 +129,18 @@ class TaskTimeoutError(RunningHubError):
     def __init__(self, task_id: str, waited: float) -> None:
         self.task_id = task_id
         self.waited = waited
-        super().__init__(
-            f"等待云端任务超时（已等待 {waited:.0f} 秒）。"
-            f"任务可能仍在排队，请记下 taskId 以便稍后用本插件的"
-            f"「按任务号取回」节点取回结果：{task_id}"
+        tmp = errors_mod.RHUserError.build(
+            errors_mod.CAT_NETWORK,
+            f"等待云端任务超时：已等 {waited:.0f} 秒仍未出结果。",
+            context={
+                "taskId": task_id,
+                "已等待": f"{waited:.0f} 秒",
+                "说明": "任务可能仍在云端排队（不算失败，钱也不一定白花）。",
+                "补救办法": "把 timeout 调大后重跑，"
+                "或用「RH 按任务号取回」节点填这个 taskId 续取结果。",
+            },
         )
+        super().__init__(str(tmp), category=tmp.category, parts=tmp.parts)
 
 
 # --------------------------------------------------------------------------
@@ -153,67 +182,208 @@ class RunningHubClient:
         self._structure_ttl = max(0.0, structure_ttl)
         self._structure_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         # Discovery 层快照缓存（S2），与结构缓存同源但内容更全，互不影响
-        self._snapshot_cache: Dict[str, Tuple[float, Any]] = {}
         # 最近一次原始响应体，供排错时原样展示给用户
         self._last_body: Any = None
+        # 最近一次「读工作流结构」的失败原因（成功时置空）
+        self._last_structure_error: Optional[errors_mod.RHUserError] = None
 
     # ---------------- 内部工具 ----------------
 
     @staticmethod
-    def _mask(text: str) -> str:
+    def _mask(text: Any) -> str:
         """把文本中可能残留的密钥片段打码，防止泄漏到 UI / 日志。"""
-        import re
+        return errors_mod.mask_secret(text)
 
-        return re.sub(r"[A-Za-z0-9]{24,}", lambda m: m.group()[:4] + "****", str(text))
+    @staticmethod
+    def _reason_parts(reason: Any) -> Tuple[str, str, str]:
+        """拆解 data.failedReason，兼容 dict 与纯字符串两种形态。
+
+        平台并不保证 failedReason 一定是对象——实测见过直接给一段字符串的情况，
+        早先这里对字符串调 .get() 会抛 AttributeError，把真正的云端报错
+        整个吞掉。三种形态全部兜住，保证云端原始报错一定带得出来。
+        """
+        if isinstance(reason, dict):
+            return (
+                str(reason.get("node_name") or ""),
+                str(reason.get("exception_message") or ""),
+                str(reason.get("traceback") or ""),
+            )
+        if isinstance(reason, str):
+            return ("", reason, "")
+        return ("", "", "")
+
+    # ---------------- 网络层 ----------------
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        stage: str = "",
+    ) -> Dict[str, Any]:
+        """发一次 HTTP 请求并返回解析后的 JSON。
+
+        把三类失败彻底分开——以前它们共用一句「无法连接 RunningHub」，
+        用户根本分不清是该换 Key、查代理还是找插件作者：
+
+          * 网络层（超时 / 连接失败 / SSL）  -> 网络异常
+          * HTTP 层（401 / 403 / 404 / 5xx） -> 按状态码归类
+          * 解析层（返回体不是合法 JSON）    -> 返回体解析失败
+
+        抛出的错误带 `retryable` 标记：只有网络问题和 5xx 值得重试，
+        4xx（Key 无效、路径错）重试纯属浪费时间。
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "Host": requests.utils.urlparse(self.base_url).netloc,
+        }
+        try:
+            if method == "post":
+                resp = self._session.post(
+                    url,
+                    data=json.dumps(payload or {}, ensure_ascii=False).encode("utf-8"),
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+            else:
+                resp = self._session.get(url, params=params, timeout=self.timeout)
+        except requests.exceptions.Timeout:
+            err = errors_mod.RHUserError.build(
+                errors_mod.CAT_NETWORK,
+                f"请求超时：{self.timeout:.0f} 秒内没有收到云端响应。",
+                stage=stage,
+                context={"接口": url, "当前超时设置": f"{self.timeout:.0f} 秒"},
+            )
+            err.retryable = True
+            raise err from None
+        except requests.exceptions.SSLError as exc:
+            err = errors_mod.RHUserError.build(
+                errors_mod.CAT_NETWORK,
+                f"SSL 握手失败：{self._mask(exc)}。"
+                "常见于公司网络 / 代理做了 HTTPS 中间人拦截，或本机时间不准。",
+                stage=stage,
+                context={"接口": url},
+            )
+            err.retryable = True
+            raise err from None
+        except requests.exceptions.ConnectionError as exc:
+            err = errors_mod.RHUserError.build(
+                errors_mod.CAT_NETWORK,
+                f"连不上服务器：{self._mask(exc)}。"
+                "通常是代理 / VPN / 防火墙挡住了，或域名没解析。",
+                stage=stage,
+                context={"接口": url, "base_url": self.base_url},
+            )
+            err.retryable = True
+            raise err from None
+        except requests.exceptions.RequestException as exc:
+            err = errors_mod.RHUserError.build(
+                errors_mod.CAT_NETWORK,
+                f"请求异常：{self._mask(exc)}",
+                stage=stage,
+                context={"接口": url},
+            )
+            err.retryable = True
+            raise err from None
+
+        status = int(getattr(resp, "status_code", 0) or 0)
+        if status >= 400:
+            err = errors_mod.RHUserError.build(
+                errors_mod.http_category(status),
+                errors_mod.http_reason(status),
+                stage=stage,
+                context={
+                    "接口": url,
+                    "HTTP 状态码": status,
+                    "服务端返回": errors_mod.truncate(getattr(resp, "text", ""), 200),
+                },
+            )
+            # 5xx 是服务端抖动，值得重试；4xx 是请求本身有问题，重试无意义
+            err.retryable = 500 <= status < 600
+            raise err
+
+        try:
+            return resp.json()
+        except ValueError:
+            err = errors_mod.RHUserError.build(
+                errors_mod.CAT_RESPONSE,
+                "云端返回的内容不是合法 JSON（可能被网关 / 代理替换成了 HTML 错误页）。",
+                stage=stage,
+                context={
+                    "接口": url,
+                    "HTTP 状态码": status,
+                    "服务端原始返回": errors_mod.truncate(getattr(resp, "text", ""), 300),
+                },
+            )
+            err.retryable = False
+            raise err from None
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """带重试的 JSON POST。返回服务端 data 字段（dict 或 list）。"""
         url = f"{self.base_url}{path}"
-        last_exc: Optional[Exception] = None
+        stage = _PATH_STAGES.get(path, f"调用 {path}")
+        body: Dict[str, Any] = {}
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = self._session.post(
-                    url,
-                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Host": requests.utils.urlparse(self.base_url).netloc,
-                    },
-                    timeout=self.timeout,
-                )
-                resp.raise_for_status()
-                body = resp.json()
-            except Exception as exc:  # 网络层/解析层异常 -> 重试
-                last_exc = exc
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_interval * attempt)
-                    continue
-                raise RunningHubError(
-                    f"无法连接 RunningHub（{self.base_url}）：{self._mask(exc)}。"
-                    f"请检查网络代理设置，或到 runninghub.cn 确认服务可用。"
-                ) from exc
+                body = self._request("post", url, payload=payload, stage=stage)
+                break
+            except errors_mod.RHUserError as exc:
+                if not getattr(exc, "retryable", False) or attempt >= self.max_retries:
+                    raise
+                _emit_retry(path, attempt, self.max_retries)
+                time.sleep(self.retry_interval * attempt)
 
-            code = body.get("code")
-            msg = self._mask(body.get("msg", ""))
-            data = body.get("data")
+        if not isinstance(body, dict):
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_RESPONSE,
+                f"云端返回体不是对象，无法读取业务状态码（实际类型：{type(body).__name__}）。",
+                stage=stage,
+                context={"服务端原始返回": errors_mod.dumps(body)},
+            )
 
-            if code == 0:
-                return data if data is not None else {}
+        code = body.get("code")
+        msg = self._mask(body.get("msg", ""))
+        data = body.get("data")
 
-            # 业务失败：805 需要特殊处理以带出云端节点级报错，其余直接抛中文错误
-            if code == CODE_FAILED or (isinstance(data, dict) and "failedReason" in data):
-                reason = (data or {}).get("failedReason") or {}
-                raise TaskFailedError(
-                    node_name=reason.get("node_name", ""),
-                    exception_message=self._mask(reason.get("exception_message", "")),
-                    traceback=self._mask(reason.get("traceback", "")),
-                )
+        if code == 0:
+            return data if data is not None else {}
 
-            hint = _ERROR_HINTS.get(code, f"服务端返回码 {code}：{msg}")
-            raise RunningHubError(f"RunningHub 调用失败 —— {hint}", code=code)
+        # 业务失败：805 需要特殊处理以带出云端节点级报错，其余直接抛中文错误
+        if code == CODE_FAILED or (isinstance(data, dict) and "failedReason" in data):
+            node_name, detail, tb = self._reason_parts((data or {}).get("failedReason"))
+            raise TaskFailedError(
+                node_name=node_name,
+                exception_message=self._mask(detail),
+                traceback=self._mask(tb),
+            )
 
-        raise RunningHubError(f"重试 {self.max_retries} 次后仍失败：{self._mask(last_exc)}")
+        raise self._business_error(code, msg, stage, body)
+
+    def _business_error(
+        self, code: Any, msg: str, stage: str, body: Dict[str, Any]
+    ) -> errors_mod.RHUserError:
+        """把平台业务码包装成带分类 + 排查步骤的中文错误。
+
+        803 单独走 nodes 层的逐条诊断（那里握着工作流结构，能点名到具体某一条
+        映射），所以这里不覆盖它，只保证其余错误码也带得上码值和原文。
+        """
+        category = errors_mod.code_category(code)
+        hint = errors_mod.CODE_HINTS.get(code, f"服务端返回码 {code}：{msg}")
+        err = errors_mod.RHUserError.build(
+            category,
+            f"云端返回错误码 {code} —— {hint}",
+            stage=stage,
+            context={
+                "错误码": code,
+                "服务端原话": msg,
+                "服务端原始返回": errors_mod.dumps(body),
+            },
+        )
+        err.retryable = False
+        return err
 
     # ---------------- 公开接口 ----------------
 
@@ -225,12 +395,21 @@ class RunningHubClient:
     ) -> str:
         """提交任务，返回 taskId。"""
         if not self.api_key:
-            raise RunningHubError(
-                "缺少 RunningHub API Key。请在节点参数里填写，"
-                "或在本插件目录新建 config.json 写入 api_key。"
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_AUTH,
+                "没有拿到 API Key（节点输入框和 config.ini 里都是空的）。",
+                stage=_PATH_STAGES["/task/openapi/create"],
+                context={
+                    "配置文件位置": "插件目录下的 config.ini / config.json",
+                    "说明": "节点输入框留空时才会读配置文件；两处都空就无法调用。",
+                },
             )
         if not workflow_id or not str(workflow_id).strip():
-            raise RunningHubError("缺少 workflow_id（RunningHub 工作流 ID）。")
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_WORKFLOW,
+                "没有拿到 workflow_id（节点输入框和配置文件里都是空的）。",
+                stage=_PATH_STAGES["/task/openapi/create"],
+            )
 
         payload: Dict[str, Any] = {
             "apiKey": self.api_key,
@@ -244,14 +423,30 @@ class RunningHubClient:
         data = self._post("/task/openapi/create", payload)
         task_id = data.get("taskId") if isinstance(data, dict) else None
         if not task_id:
-            raise RunningHubError(
-                f"提交任务未返回 taskId，服务端返回：{self._mask(data)}"
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_RESPONSE,
+                "提交接口返回成功，但响应里没有 taskId（无法轮询结果）。",
+                stage=_PATH_STAGES["/task/openapi/create"],
+                context={
+                    "工作流 ID": workflow_id,
+                    "服务端原始返回": errors_mod.dumps(data),
+                },
             )
         return str(task_id)
 
     def last_raw_body(self) -> Any:
         """最近一次接口返回的原始响应体，用于排错时原样展示。"""
         return self._last_body
+
+    def get_account_status(self) -> Dict[str, Any]:
+        """查询账户积分 / 余额（官方 /uc/openapi/accountStatus 接口）。
+
+        返回 data 原始 dict，典型字段：remainCoins（剩余积分，可能是字符串）、
+        currentTaskCounts、remainMoney、currency。查询失败会抛分类错误，
+        调用方（nodes 层）应自行容错——积分显示只是锦上添花，不能影响任务本身。
+        """
+        # 注意：这个接口的参数名是小写 apikey（与工作流 API 的 apiKey 不同）
+        return self._post("/uc/openapi/accountStatus", {"apikey": self.api_key})
 
     def fetch_outputs(self, task_id: str) -> Dict[str, Any]:
         """查询一次任务结果。
@@ -264,39 +459,40 @@ class RunningHubClient:
         """
         payload = {"apiKey": self.api_key, "taskId": task_id}
         url = f"{self.base_url}/task/openapi/outputs"
+        stage = _PATH_STAGES["/task/openapi/outputs"]
 
-        resp = self._session.post(
-            url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Host": requests.utils.urlparse(self.base_url).netloc,
-            },
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        body = resp.json()
+        body = self._request("post", url, payload=payload, stage=stage)
         self._last_body = body
+        if not isinstance(body, dict):
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_RESPONSE,
+                f"查询结果返回体不是对象，无法判断任务状态（实际类型：{type(body).__name__}）。",
+                stage=stage,
+                context={"taskId": task_id, "服务端原始返回": errors_mod.dumps(body)},
+            )
 
         code = body.get("code")
         data = body.get("data")
         status = self._status_of(data, body)
 
         if code == CODE_FAILED or (isinstance(data, dict) and "failedReason" in data):
-            reason = (data or {}).get("failedReason") or {}
+            node_name, detail, tb = self._reason_parts((data or {}).get("failedReason"))
             raise TaskFailedError(
-                node_name=reason.get("node_name", ""),
-                exception_message=self._mask(reason.get("exception_message", "")),
-                traceback=self._mask(reason.get("traceback", "")),
+                node_name=node_name,
+                exception_message=self._mask(detail),
+                traceback=self._mask(tb),
             )
         if status in ("FAILED", "FAIL", "ERROR"):
+            node_name, detail, tb = self._reason_parts(
+                (data or {}).get("failedReason")
+                or (data or {}).get("msg")
+                or (data or {}).get("error")
+                or "云端任务失败"
+            )
             raise TaskFailedError(
-                exception_message=self._mask(
-                    (data or {}).get("failedReason")
-                    or (data or {}).get("msg")
-                    or (data or {}).get("error")
-                    or "云端任务失败"
-                )
+                node_name=node_name,
+                exception_message=self._mask(detail or "云端任务失败"),
+                traceback=self._mask(tb),
             )
         if code == CODE_RUNNING or status in ("RUNNING", "EXECUTING", "PROCESSING"):
             return {"state": "running", "outputs": []}
@@ -310,8 +506,19 @@ class RunningHubClient:
         if isinstance(data, list):
             return {"state": "success", "outputs": data}
 
-        hint = _ERROR_HINTS.get(code, self._mask(body.get("msg", "")))
-        raise RunningHubError(f"查询任务 {task_id} 失败 —— {hint}", code=code)
+        hint = errors_mod.CODE_HINTS.get(code, self._mask(body.get("msg", "")))
+        err = errors_mod.RHUserError.build(
+            errors_mod.code_category(code),
+            f"查询任务结果失败，云端返回错误码 {code} —— {hint}",
+            stage=stage,
+            context={
+                "taskId": task_id,
+                "错误码": code,
+                "服务端原始返回": errors_mod.dumps(body),
+            },
+        )
+        err.retryable = False
+        raise err
 
     @staticmethod
     def _status_of(data: Any, body: Dict[str, Any]) -> str:
@@ -364,9 +571,28 @@ class RunningHubClient:
         started = time.time()
         last_state = ""
         empty_seen = 0
+        # 轮询期间的瞬时网络抖动不该直接判死：任务已经付费了，
+        # 一次读超时就放弃等于白花钱。可重试的错误先本地重试几次。
+        network_glitches = 0
 
         while True:
-            result = self.fetch_outputs(task_id)
+            try:
+                result = self.fetch_outputs(task_id)
+            except errors_mod.RHUserError as exc:
+                if not getattr(exc, "retryable", False) or network_glitches >= 3:
+                    # 任务可能还在云端跑着，报错里必须带上 taskId 让用户可以续取
+                    raise exc.retitled(
+                        extra_context={
+                            "taskId": task_id,
+                            "已等待": f"{time.time() - started:.0f} 秒",
+                            "补救办法": "任务可能仍在云端运行，"
+                            "用「RH 按任务号取回」节点填这个 taskId 可以续取结果，不必重跑。",
+                        }
+                    ) from exc
+                network_glitches += 1
+                time.sleep(min(poll_interval, 5.0))
+                continue
+
             state = result["state"]
             outputs = result["outputs"]
 
@@ -424,60 +650,49 @@ class RunningHubClient:
             self._structure_cache[key] = (time.time(), structure)
         return structure
 
-    def get_workflow_snapshot(self, workflow_id: str) -> Optional[Any]:
-        """拉取云端工作流结构并返回 Discovery 层快照（S2）。
-
-        比 `get_workflow_structure` 多三样东西：每字段的 `value_kind`
-        （字面量 / 连线）、节点执行态、以及连线边列表与指纹，供绑定漂移检测使用。
-        拿不到结构时返回空快照（含 warning），不抛异常——由调用方决定是否报错。
-        """
-        from . import snapshot as snapshot_mod
-
-        key = str(workflow_id).strip()
-        if not key:
-            return None
-
-        hit = self._snapshot_cache.get(key)
-        if hit is not None:
-            stamp, value = hit
-            if self._structure_ttl <= 0 or (time.time() - stamp) < self._structure_ttl:
-                return value
-
-        snap = snapshot_mod.build_snapshot(self._fetch_workflow_raw(key), workflow_id=key)
-        if snap.nodes:
-            self._snapshot_cache[key] = (time.time(), snap)
-        return snap
-
     def _fetch_workflow_raw(self, workflow_id: str) -> Any:
-        """实际发起请求。该接口在不同版本下 GET/POST 都能通，逐个试。"""
+        """实际发起请求。该接口在不同版本下 GET/POST 都能通，逐个试。
+
+        失败时不再静默返回 None：把最后一次（最有诊断价值的）失败原因记在
+        `self._last_structure_error` 上，上层就能说清「是 Key 无效还是 ID 不对」
+        而不是笼统一句「没读到结构」。
+        """
         url = f"{self.base_url}/api/openapi/getJsonApiFormat"
+        stage = _PATH_STAGES["/api/openapi/getJsonApiFormat"]
         attempts = (
             ("post", {"apiKey": self.api_key, "workflowId": workflow_id}),
             ("get", {"workflowId": workflow_id, "apiKey": self.api_key}),
             ("get", {"workflowId": workflow_id}),
         )
+        last_error: Optional[BaseException] = None
+
         for method, params in attempts:
             try:
                 if method == "post":
-                    resp = self._session.post(
-                        url,
-                        data=json.dumps(params, ensure_ascii=False).encode("utf-8"),
-                        headers={
-                            "Content-Type": "application/json",
-                            "Host": requests.utils.urlparse(self.base_url).netloc,
-                        },
-                        timeout=self.timeout,
-                    )
+                    body = self._request("post", url, payload=params, stage=stage)
                 else:
-                    resp = self._session.get(url, params=params, timeout=self.timeout)
-                resp.raise_for_status()
-                body = resp.json()
-            except Exception:
+                    body = self._request("get", url, params=params, stage=stage)
+            except errors_mod.RHUserError as exc:
+                # 认证 / 工作流类原因比纯网络抖动更有诊断价值，优先保留
+                if last_error is None or getattr(
+                    last_error, "category", ""
+                ) == errors_mod.CAT_NETWORK:
+                    last_error = exc
                 continue
 
             if not isinstance(body, dict):
                 continue
+
+            code = body.get("code")
+            if code is not None and str(code) not in ("0", ""):
+                # 接口通了但业务码非零（Key 无效 / 工作流不存在）——这是最值钱的线索
+                last_error = self._business_error(
+                    code, self._mask(body.get("msg", "")), stage, body
+                )
+                continue
+
             self._last_body = body
+            self._last_structure_error = None
             data = body.get("data", body)
             if isinstance(data, dict):
                 # 部分版本把工作流塞在 data.prompt 的字符串里
@@ -486,11 +701,19 @@ class RunningHubClient:
                     if isinstance(inner, (dict, str)):
                         return inner
             return data
+
+        self._last_structure_error = (
+            errors_mod.explain(last_error) if last_error is not None else None
+        )
         return None
 
-    def get_workflow_params(self, workflow_id: str) -> Dict[str, Any]:
-        """旧接口名，保留兼容。返回归一化后的结构。"""
-        return self.get_workflow_structure(workflow_id)  # type: ignore[return-value]
+    def last_structure_error(self) -> Optional[errors_mod.RHUserError]:
+        """最近一次「读云端工作流结构」的失败原因（成功时为 None）。
+
+        用于把「没读到结构」这类曾经语焉不详的降级警告，改成带错误码和
+        排查方向的精确提示。
+        """
+        return self._last_structure_error
 
 
 __all__ = [

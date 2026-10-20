@@ -12,6 +12,7 @@ ComfyUI-RunningHub-Latent 冒烟测试
 import os
 import sys
 import tempfile
+import time
 import types
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -147,8 +148,14 @@ check("正确筛出 2 个 latent", len(picked) == 2, str(len(picked)))
 check("按 nodeId 稳定排序", picked[0]["nodeId"] == "10")
 merged = _merge_latents([torch.ones(1, 4, 8, 8), torch.ones(1, 4, 8, 8)])
 check("同形状沿 batch 合并为 [2,4,8,8]", tuple(merged.shape) == (2, 4, 8, 8))
-mism = _merge_latents([torch.ones(1, 4, 8, 8), torch.ones(1, 4, 16, 16)])
-check("形状不一致时回退取第一个", tuple(mism.shape) == (1, 4, 8, 8))
+# 形状不一致：用户确认改回报错（尺寸不同的多个 latent 反正也用不了，
+# 静默取第一个只会把问题推迟到下游解码时才炸出来）。
+try:
+    _merge_latents([torch.ones(1, 4, 8, 8), torch.ones(1, 4, 16, 16)])
+    check("形状不一致时报错而非静默取第一个", False)
+except RHUserError as e:
+    check("形状不一致时报错而非静默取第一个", "尺寸不同" in str(e))
+    print(f"         消息示例：{str(e).splitlines()[0]}")
 
 try:
     _collect_latents([{"fileType": "png", "fileUrl": "https://x/only.png", "nodeId": "9"}])
@@ -227,6 +234,80 @@ check("参数变化 -> 不同键", k1 != k3)
 check("参数顺序无关（已归一化）", k4 == k5)
 check("工作流 ID 参与哈希", k1 != k6)
 check("键为 32 位 md5", len(k1) == 32)
+
+# ---------------------------------------------------------------------------
+print("\n=== 13b. 缓存自动清理（prune） ===")
+
+
+def _make_cache_file(root, name, size_kb, mtime_offset):
+    """在临时缓存目录造一个假 latent 文件，mtime 手动指定以便测 LRU 顺序。"""
+    path = os.path.join(root, cache_mod.CACHE_DIRNAME, name)
+    with open(path, "wb") as fh:
+        fh.write(b"\0" * (size_kb * 1024))
+    stamp = time.time() - mtime_offset
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+with tempfile.TemporaryDirectory() as tmp_root:
+    cache_dir = os.path.join(tmp_root, cache_mod.CACHE_DIRNAME)
+    os.makedirs(cache_dir)
+    # 每个文件 400KB：总量 1200KB，上限 1MB（1024KB）→ 删 1 个最旧的刚好达标
+    oldest = _make_cache_file(tmp_root, "a.latent", 400, 3000)  # 最旧
+    middle = _make_cache_file(tmp_root, "b.latent", 400, 2000)
+    newest = _make_cache_file(tmp_root, "c.latent", 400, 1000)
+    junk = _make_cache_file(tmp_root, "not_latent.txt", 600, 500)  # 非 .latent，不应被碰
+
+    removed = cache_mod.prune(max_mb=1.0, root=tmp_root)
+    check("超限删除最旧文件", removed == 1 and not os.path.exists(oldest))
+    check("保留较新文件", os.path.exists(middle) and os.path.exists(newest))
+    check("非 .latent 文件不受影响", os.path.exists(junk))
+
+    # keep_path 保护：middle 被点名保护后，按新旧顺序轮到的应是 middle，
+    # 但它受保护 → 改删 next（newest）
+    removed2 = cache_mod.prune(max_mb=0.4, root=tmp_root, keep_path=middle)
+    check("keep_path 保护不被删除", removed2 == 1 and os.path.exists(middle))
+    check("保护生效后删的是次旧文件", not os.path.exists(newest))
+
+    # 上限足够大 → 不删任何东西
+    removed3 = cache_mod.prune(max_mb=100.0, root=tmp_root)
+    check("未超限不删文件", removed3 == 0)
+
+    # 0 = 关闭清理
+    removed4 = cache_mod.prune(max_mb=0.0, root=tmp_root)
+    check("max_mb=0 关闭清理", removed4 == 0)
+
+# 非法值回落默认值
+check("非法 cache_max_mb 回落默认", cache_mod._max_cache_mb() >= 0)
+
+# ---------------------------------------------------------------------------
+print("\n=== 13c. 静态检查：嵌套函数不得遮蔽模块级函数 ===")
+# 真实事故：_run_sampling 内部定义了 `def _stage(text)`，把模块级
+# `_stage(node, stage, ...)` 遮蔽成局部名，前面的 `with _stage(...)`
+# 直接 UnboundLocalError。这里用 AST 在导入前就把同类结构拦下来。
+import ast
+
+with open(os.path.join(PLUGIN, "nodes.py"), "r", encoding="utf-8") as fh:
+    tree = ast.parse(fh.read())
+
+module_funcs = {
+    n.name
+    for n in tree.body
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+}
+
+shadowed = []
+for node in ast.walk(tree):
+    # 只看真正嵌套在函数体里的 def（模块级 def 本身合法，类方法另有作用域）
+    for child in ast.iter_child_nodes(node):
+        if (
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not isinstance(node, ast.Module)
+            and not isinstance(node, ast.ClassDef)
+            and child.name in module_funcs
+        ):
+            shadowed.append(f"{child.name} (line {child.lineno})")
+check("无嵌套函数遮蔽模块级函数", not shadowed, str(shadowed))
 
 # ---------------------------------------------------------------------------
 print("\n=== 14. API 客户端状态机（mock） ===")
@@ -703,17 +784,25 @@ check("_preview 压平空白并限长",
 print("\n=== 30. 音视频复合 latent（MiniMax H3）===")
 
 from rhplugin.nodes import (
-    RunningHubAVLatentMerge,
-    RunningHubAVLatentSplit,
     _describe_samples,
 )
 
 video = torch.ones(1, 24, 3, 4, 4) * 0.5
 audio = torch.ones(1, 32, 2, 10) * 0.25
 
+# 手工构造一个社区约定格式的 AV 单文件（latent_0/latent_1 + tensor_count）
 tmpdir = tempfile.mkdtemp()
 av_path = os.path.join(tmpdir, "MiniMaxH3_00001_.latent")
-latent_mod.save_av_latent(av_path, video, audio, metadata={"prompt": "test"})
+safetensors.torch.save_file(
+    {
+        "latent_0": video.contiguous(),
+        "latent_1": audio.contiguous(),
+        "latent_format_version_0": torch.tensor([]),
+        "tensor_count": torch.tensor([2]),
+    },
+    av_path,
+    metadata={"prompt": "test"},
+)
 check("AV latent 文件已写出", os.path.exists(av_path))
 
 with open(av_path, "rb") as fh:
@@ -746,20 +835,8 @@ check("识别 .h3latent 为 latent", _classify({"fileUrl": "https://x/a.h3latent
 check("识别 .avlatent 为 latent", _classify({"fileUrl": "https://x/a.avlatent"}) == "latent")
 check("带签名查询串的 .latent 仍识别", _classify({"fileUrl": "https://x/a.latent?token=1"}) == "latent")
 
-split_node = RunningHubAVLatentSplit()
-out_v, out_a = split_node.split(parsed)
-check("拆分节点输出视频 latent", tuple(out_v["samples"].shape) == (1, 24, 3, 4, 4))
-check("拆分节点输出音频 latent", tuple(out_a["samples"].shape) == (1, 32, 2, 10))
-try:
-    split_node.split({"samples": torch.zeros(1, 16, 4, 4)})
-    check("非复合 latent 拆分必须报错（杜绝静默失效）", False)
-except RHUserError:
-    check("非复合 latent 拆分给出可读报错", True)
-
-merge_node = RunningHubAVLatentMerge()
-merged = merge_node.merge(out_v, out_a)[0]
-check("合并节点还原复合 latent", latent_mod.is_nested(merged["samples"]))
-check("合并时音频为空则原样返回", not latent_mod.is_nested(merge_node.merge(out_v)[0]["samples"]))
+# 拆分/合并/保存三节点已随「单文件方案定稿」删除（2026-10-07 用户拍板）：
+# 本地只负责 parse 单文件复合 latent，不再提供本地 AV 节点。
 
 text = _describe_samples(parsed["samples"])
 check("复合 latent 的形状回显同时含视频与音频", "视频" in text and "音频" in text, text)
@@ -916,6 +993,92 @@ check("连线字段标注了来源节点", "由 nodeId=6 提供" in templates, t
 check("模板里区分了字面量与连线两类字段",
       '{"nodeId": "3", "fieldName": "steps", "fieldValue": 20}' in templates, templates)
 check("空结构不炸且返回空串", wf_mod.mapping_templates({}) == "")
+
+# ---------------------------------------------------------------------------
+print("\n=== 33. 提交前映射预校验（split_injection_problems） ===")
+from rhplugin.nodes import (
+    RunningHubCacheManager,
+    _prevalidate_injections,
+)
+
+struct_pre = {
+    "3": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20}},
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": ["270", 0]}},
+}
+warns_pre: list = []
+try:
+    _prevalidate_injections(
+        struct_pre, [{"nodeId": "99", "fieldName": "seed", "fieldValue": 1}], warns_pre
+    )
+    check("致命映射问题（nodeId 不存在）必须报错", False)
+except RHUserError as e:
+    check("致命映射问题（nodeId 不存在）必须报错", "803" in str(e) or "不存在" in str(e))
+try:
+    _prevalidate_injections(
+        struct_pre, [{"nodeId": "3", "fieldName": "cfg", "fieldValue": 7}], warns_pre
+    )
+    check("致命映射问题（字段不存在）必须报错", False)
+except RHUserError as e:
+    check("致命映射问题（字段不存在）必须报错", "没有字段" in str(e))
+warns_pre.clear()
+_prevalidate_injections(
+    struct_pre, [{"nodeId": "6", "fieldName": "text", "fieldValue": "x"}], warns_pre
+)
+check("连线字段降级为警告而不阻断", len(warns_pre) == 1 and "连线" in warns_pre[0], str(warns_pre))
+warns_pre.clear()
+_prevalidate_injections(
+    {}, [{"nodeId": "3", "fieldName": "seed", "fieldValue": 1}], warns_pre
+)
+check("无结构时跳过校验不报错", warns_pre == [])
+check("split_injection_problems 分级正确",
+      wf_mod.split_injection_problems(struct_pre, [
+          {"nodeId": "99", "fieldName": "x", "fieldValue": 1},
+          {"nodeId": "6", "fieldName": "text", "fieldValue": "y"},
+      ])[0] and len(wf_mod.split_injection_problems(struct_pre, [
+          {"nodeId": "6", "fieldName": "text", "fieldValue": "y"},
+      ])[1]) == 1)
+
+# ---------------------------------------------------------------------------
+print("\n=== 34. 任务台账（ledger） ===")
+from rhplugin.core import ledger as ledger_mod
+
+with tempfile.TemporaryDirectory() as td:
+    ok = ledger_mod.append_record(
+        {"node": "t", "task_id": "1", "outcome": "success", "coins_spent": 0.5}, root=td
+    )
+    check("台账写入成功", ok and os.path.isfile(os.path.join(td, ledger_mod.LEDGER_FILENAME)))
+    ledger_mod.append_record(
+        {"node": "t", "task_id": "2", "outcome": "failed",
+         "error_category": "cloud", "error_reason": "boom"}, root=td
+    )
+    recs = ledger_mod.read_records(root=td, limit=10)
+    check("台账读取（新→旧）", len(recs) == 2 and recs[0]["task_id"] == "2")
+    line = ledger_mod.format_record(recs[0])
+    check("台账渲染含失败信息", "❌" in line and "cloud" in line, line)
+    line_ok = ledger_mod.format_record(recs[1])
+    check("成功记录渲染含积分", "积分" in line_ok or "taskId" in line_ok, line_ok)
+    n = ledger_mod.clear(root=td)
+    check("台账清空", n == 2 and ledger_mod.read_records(root=td) == [])
+
+with tempfile.TemporaryDirectory() as td:
+    p = ledger_mod.ledger_path(td)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write('{"task_id": "ok"}\nnot-json-line\n')
+    recs = ledger_mod.read_records(root=td)
+    check("坏行跳过不炸", len(recs) == 1 and recs[0]["task_id"] == "ok")
+
+# ---------------------------------------------------------------------------
+print("\n=== 35. 缓存管理节点 ===")
+mgr = RunningHubCacheManager()
+report_view = mgr.run("查看")[0]
+check("缓存管理-查看输出目录信息", "缓存目录" in report_view, report_view.splitlines()[0])
+fake_cache = os.path.join(cache_mod.get_cache_dir(), "testmgr_fake.latent")
+with open(fake_cache, "wb") as fh:
+    fh.write(b"\0" * 1024)
+report_clean = mgr.run("清理")[0]
+check("缓存管理-清理删除缓存文件",
+      not os.path.exists(fake_cache) and "已清理" in report_clean)
+check("缓存管理-清理报告包含上限提示", "cache_max_mb" in report_clean)
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)

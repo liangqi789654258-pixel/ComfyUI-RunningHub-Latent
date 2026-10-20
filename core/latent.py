@@ -290,12 +290,6 @@ def load_safetensors(source: Union[str, bytes]) -> torch.Tensor:
     return _pick_tensor(data, label)
 
 
-def load_safetensors_av(source: Union[str, bytes]):
-    """按音视频复合 latent 解析；不是 AV 容器返回 None。"""
-    data, label = _load_safetensors_dict(source)
-    return parse_av(data, label)
-
-
 def load_numpy(source: Union[str, bytes]) -> torch.Tensor:
     """加载 .npy。"""
     if np is None:
@@ -387,32 +381,6 @@ def parse(blob: bytes, url: str = "") -> dict:
     return to_comfy_latent(parse_latent_bytes(blob, url), url)
 
 
-def save_av_latent(
-    path: str,
-    video: torch.Tensor,
-    audio: torch.Tensor,
-    metadata: Optional[dict] = None,
-) -> str:
-    """把 (视频 latent, 音频 latent) 写成一个 safetensors 文件。
-
-    键名沿用社区约定 latent_0 / latent_1，并带上 latent_format_version_0
-    标记（读回时据此判断「不需要做 0.18215 补偿」）。
-    """
-    if safetensors is None:
-        raise LatentParseError("缺少 safetensors 依赖，请执行：pip install safetensors")
-
-    payload = {
-        "latent_0": video.detach().to("cpu").contiguous(),
-        "latent_1": audio.detach().to("cpu").contiguous(),
-        "latent_format_version_0": torch.tensor([]),
-        "tensor_count": torch.tensor([2]),
-    }
-    meta = {str(k): str(v) for k, v in (metadata or {}).items() if v is not None}
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    safetensors.torch.save_file(payload, path, metadata=meta)
-    return path
-
-
 __all__ = [
     "LatentParseError",
     "parse",
@@ -422,5 +390,4 @@ __all__ = [
     "looks_like_safetensors",
     "is_nested",
     "make_nested",
-    "save_av_latent",
 ]

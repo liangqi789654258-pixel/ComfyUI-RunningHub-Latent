@@ -28,7 +28,26 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from . import errors as errors_mod
+
 CACHE_DIRNAME = ".rh_latent_cache"
+
+# 缓存总大小默认上限（MB）。512MB 约够存 20~100 个 H3 单文件 latent，
+# 既能留住近期可复用的结果，又不至于悄悄吃掉几个 G 磁盘。
+DEFAULT_MAX_MB = 512.0
+
+
+def _max_cache_mb() -> float:
+    """读 config.ini 里的 cache_max_mb；读不到/写坏回落默认值。"""
+    try:
+        from . import settings as settings_mod
+
+        raw = settings_mod.get("cache_max_mb", None)
+        if raw is None or str(raw).strip() == "":
+            return DEFAULT_MAX_MB
+        return float(raw)
+    except Exception:
+        return DEFAULT_MAX_MB
 
 
 def canonical_dumps(obj: Any) -> str:
@@ -81,29 +100,143 @@ def cache_path_for(key: str) -> Optional[str]:
 
 
 def store(key: str, blob: bytes) -> str:
-    """写入缓存，返回文件路径。"""
+    """写入缓存，返回文件路径。写完顺手做一次超限清理。"""
     path = os.path.join(get_cache_dir(), f"{key}.latent")
     tmp = f"{path}.tmp"
     with open(tmp, "wb") as fh:
         fh.write(blob)
     # 先写临时文件再原子替换，避免中断留下半截文件被当作有效缓存
     os.replace(tmp, path)
+    prune(keep_path=path)
     return path
+
+
+def prune(
+    max_mb: Optional[float] = None,
+    root: Optional[str] = None,
+    keep_path: Optional[str] = None,
+) -> int:
+    """缓存总大小超过 max_mb（MB）时，按修改时间从旧到新删除，返回删除个数。
+
+    max_mb 传 0 或负数 = 关闭自动清理。
+    `root` 供测试注入临时目录；`keep_path` 保护刚写入的文件不被立刻清掉。
+    """
+    if max_mb is None:
+        max_mb = _max_cache_mb()
+    if max_mb is None or max_mb <= 0:
+        return 0
+
+    cache_dir = get_cache_dir(root)
+    entries: List[tuple] = []
+    total = 0
+    for name in os.listdir(cache_dir):
+        path = os.path.join(cache_dir, name)
+        if not name.endswith(".latent") or not os.path.isfile(path):
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        entries.append((st.st_mtime, st.st_size, path))
+        total += st.st_size
+
+    limit = max_mb * 1024 * 1024
+    if total <= limit:
+        return 0
+
+    removed = 0
+    for _mtime, size, path in sorted(entries):
+        if total <= limit:
+            break
+        if keep_path and os.path.abspath(path) == os.path.abspath(keep_path):
+            continue
+        try:
+            os.remove(path)
+            total -= size
+            removed += 1
+        except OSError:
+            continue  # 文件被占用等，跳过下次再清
+
+    if removed:
+        print(
+            f"[RunningHub-Latent] latent 缓存已超过 {max_mb:.0f}MB 上限，"
+            f"自动清理了 {removed} 个最旧的缓存文件。"
+            "可在 config.ini 里设 cache_max_mb 调整上限（设 0 关闭自动清理）。"
+        )
+    return removed
+
+
+def _download_error(url: str, status: int = 0, detail: str = "") -> "errors_mod.RHUserError":
+    """把下载失败翻译成「链接过期 / 网络问题 / 服务端故障」三类之一。
+
+    以前一律报「下载失败（已重试 N 次）」，用户分不清是该重跑任务还是查网络。
+    """
+    if status in (401, 403):
+        reason = (
+            f"云端文件不允许下载（HTTP {status}）：直链带签名且会过期，"
+            "通常是链接失效或账号无权限。重跑一次任务即可拿到新链接。"
+        )
+        category = errors_mod.CAT_DOWNLOAD
+    elif status == 404:
+        reason = (
+            "云端文件已不存在（HTTP 404）：结果文件有有效期，过期会被清理。"
+            "只能重跑一次任务。"
+        )
+        category = errors_mod.CAT_DOWNLOAD
+    elif 500 <= status < 600:
+        reason = f"对象存储服务端故障（HTTP {status}），稍后重试即可。"
+        category = errors_mod.CAT_DOWNLOAD
+    elif status >= 400:
+        reason = f"下载请求被拒绝（HTTP {status}）。"
+        category = errors_mod.CAT_DOWNLOAD
+    elif detail:
+        reason = detail
+        category = errors_mod.CAT_NETWORK
+    else:
+        reason = "未知下载错误。"
+        category = errors_mod.CAT_DOWNLOAD
+
+    err = errors_mod.RHUserError.build(
+        category,
+        reason,
+        stage="下载云端 latent 文件",
+        context={"下载地址": errors_mod.truncate(url, 200)},
+        actions=(
+            errors_mod.ACTIONS[errors_mod.CAT_DOWNLOAD]
+            if category == errors_mod.CAT_DOWNLOAD
+            else errors_mod.ACTIONS[errors_mod.CAT_NETWORK]
+        ),
+    )
+    err.retryable = 500 <= status < 600
+    return err
 
 
 def download(url: str, timeout: float = 120.0, max_retries: int = 3) -> bytes:
     """下载远程文件到内存。latent 体积通常只有几十 MB，直接放内存最简单可靠。"""
-    last_exc: Optional[Exception] = None
+    last_error: Optional[errors_mod.RHUserError] = None
+
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.get(url, timeout=timeout, stream=True)
-            resp.raise_for_status()
-            return resp.content
-        except Exception as exc:
-            last_exc = exc
-            if attempt < max_retries:
-                time.sleep(2.0 * attempt)
-    raise RuntimeError(f"下载失败（已重试 {max_retries} 次）：{url}\n原因：{last_exc}")
+        except requests.exceptions.Timeout:
+            last_error = _download_error(
+                url, detail=f"下载超时：{timeout:.0f} 秒内没有收完数据。"
+            )
+        except requests.exceptions.ConnectionError as exc:
+            last_error = _download_error(url, detail=f"连不上文件服务器：{exc}")
+        except requests.exceptions.RequestException as exc:
+            last_error = _download_error(url, detail=f"下载请求异常：{exc}")
+        else:
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if status >= 400:
+                last_error = _download_error(url, status=status)
+            else:
+                return resp.content
+
+        if attempt < max_retries:
+            time.sleep(2.0 * attempt)
+
+    raise last_error or _download_error(url)
 
 
 __all__ = [
@@ -113,4 +246,6 @@ __all__ = [
     "download",
     "get_cache_dir",
     "canonical_dumps",
+    "prune",
+    "DEFAULT_MAX_MB",
 ]

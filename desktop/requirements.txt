@@ -1,0 +1,11 @@
+# RH 出图器依赖
+#
+# 注意：本程序**运行在 ComfyUI 自带的 Python 环境里**（install.bat 会自动找它），
+# 因此 torch 由 ComfyUI 提供，这里不重复声明，也不要升级它——
+# 版本不匹配会让你的 ComfyUI 一起炸。
+
+PySide6>=6.5
+pywin32>=305 ; sys_platform == "win32"
+numpy>=1.24
+imageio-ffmpeg>=0.4.9   # 自带 ffmpeg，视频编码/抽帧用
+requests>=2.28          # 云端 API（插件 core 也依赖它）

@@ -1,6 +1,9 @@
 # API Key 属个人凭证，务必不要提交
 config.json
 config.ini
+dist/
+cache/
+output/
 __pycache__/
 *.py[cod]
 .venv/

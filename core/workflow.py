@@ -254,6 +254,18 @@ def _multi_field_note(slots: List[Tuple[str, str]]) -> str:
     return ""
 
 
+def suggest_text_targets(
+    structure: Dict[str, Dict[str, Any]]
+) -> List[Tuple[str, str]]:
+    """公开入口：列出云端所有可写入的字面量文本字段。
+
+    报错文案要靠它生成**能直接照抄**的映射片段——早先文案里硬编码
+    `"fieldName": "text"`，而真实字段名可能是 `prompt` / `value` / `string`，
+    用户照抄过去又被 803 打回，等于报错本身在误导人。
+    """
+    return _literal_text_slots(structure)
+
+
 def prompt_link_diagnosis(structure: Dict[str, Dict[str, Any]], token: str) -> str:
     """说明「为什么没有自动落点」，并给出可直接照抄的手写映射修法。
 
@@ -423,6 +435,29 @@ def validate_injections(
     return [p for p in diagnose_injections(structure, injections) if p is not None]
 
 
+def split_injection_problems(
+    structure: Dict[str, Dict[str, Any]], injections: List[Dict[str, Any]]
+) -> Tuple[List[str], List[str]]:
+    """把映射问题分成（致命、连线警告）两组。
+
+    致命 = nodeId / fieldName 在云端结构里不存在，提交必被 803 整包拒绝，
+    应该在本地直接报错，不花云端钱试错；连线警告 = 注入不生效但平台不拦，
+    只值得提醒不值得阻断。
+    """
+    if not structure:
+        return [], []
+    fatal: List[str] = []
+    linked: List[str] = []
+    for problem in diagnose_injections(structure, injections):
+        if problem is None:
+            continue
+        if "已被上游连线接管" in problem:
+            linked.append(problem)
+        else:
+            fatal.append(problem)
+    return fatal, linked
+
+
 def describe(structure: Dict[str, Dict[str, Any]], limit: int = 60) -> str:
     """把工作流结构渲染成人能读的清单（供探查节点输出）。"""
     lines: List[str] = []
@@ -505,6 +540,7 @@ __all__ = [
     "build_prompt_injections",
     "find_seed_targets",
     "validate_injections",
+    "split_injection_problems",
     "diagnose_injections",
     "iter_string_fields",
     "describe",

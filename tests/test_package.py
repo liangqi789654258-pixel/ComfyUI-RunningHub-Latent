@@ -137,7 +137,7 @@ for fname in example_files:
 print("\n=== 4. 必需交付文件齐备 ===")
 required = ["README.md", "LICENSE", "CHANGELOG.md", "requirements.txt",
             "config.example.json", "config.example.ini", ".gitignore",
-            "__init__.py", "nodes.py", "web/rh_warning.js"]
+            "__init__.py", "nodes.py", "web/rh_key_guard.js"]
 for f in required:
     p = os.path.join(PLUGIN, f)
     if os.path.isfile(p) and os.path.getsize(p) > 0:
@@ -164,6 +164,41 @@ for dirpath, dirnames, filenames in os.walk(PLUGIN):
 if not found:
     good("未发现硬编码密钥")
 
+# 5b. 本机配置的真实 Key 绝不能出现在任何要发布的文件里。
+#     这条比上面的正则可靠得多：它精确匹配「你自己的 Key」，
+#     不会像正则那样漏掉 mask_key("…")、json 里的值、markdown 里的示例。
+try:
+    from rhplugin.core import settings as _settings
+except Exception:
+    _settings = None
+
+if _settings is not None:
+    _own_key = str(_settings.get("api_key") or "").strip()
+    if len(_own_key) >= 16:
+        leaked = []
+        skip_names = {"config.ini", "config.json"}  # 被 .gitignore 排除，本身就该有
+        skip_dirs = {"__pycache__", ".git", "cache", "output"}
+        for dirpath, dirnames, filenames in os.walk(PLUGIN):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            for fn in filenames:
+                if fn in skip_names:
+                    continue
+                if not fn.endswith((".py", ".json", ".md", ".ini", ".js", ".txt")):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    text = open(p, encoding="utf-8", errors="ignore").read()
+                except OSError:
+                    continue
+                if _own_key in text:
+                    leaked.append(os.path.relpath(p, PLUGIN))
+        if leaked:
+            fail("本机配置的 API Key 出现在以下要发布的文件里：" + "、".join(leaked))
+        else:
+            good("本机配置的 API Key 未出现在任何发布文件中")
+    else:
+        good("本机未配置 Key，跳过「自有 Key 泄漏」检查")
+
 print("\n=== 6. 示例覆盖度与前后端契约 ===")
 covered = {n["type"] for f in example_files
            for n in json.load(open(os.path.join(EXAMPLES, f), encoding="utf-8"))["nodes"]
@@ -174,20 +209,20 @@ for node_type in MAIN_NODES:
     else:
         fail(f"没有任何示例工作流使用 {node_type}")
 
-# Python 发警告用的事件名，必须与 web/rh_warning.js 监听的名字完全一致，
+# Python 发警告用的事件名，必须与 web/rh_key_guard.js 监听的名字完全一致，
 # 否则「节点变黄」会静默失效——这正是本次改造要消灭的那类问题。
 from rhplugin import nodes as nodes_mod
 
 event_name = getattr(nodes_mod, "_WARNING_EVENT", "")
-js_path = os.path.join(PLUGIN, "web", "rh_warning.js")
+js_path = os.path.join(PLUGIN, "web", "rh_key_guard.js")
 if event_name and os.path.isfile(js_path):
     js = open(js_path, encoding="utf-8").read()
     if event_name in js:
         good(f"前后端警告事件名一致（{event_name}）")
     else:
-        fail(f"web/rh_warning.js 未监听事件名 {event_name}")
+        fail(f"web/rh_key_guard.js 未监听事件名 {event_name}")
 else:
-    fail("缺少警告事件名或 web/rh_warning.js")
+    fail("缺少警告事件名或 web/rh_key_guard.js")
 
 # WEB_DIRECTORY 必须声明，否则前端脚本根本不会被注入
 if getattr(plugin, "WEB_DIRECTORY", None) == "web":

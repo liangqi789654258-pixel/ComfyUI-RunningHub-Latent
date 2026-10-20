@@ -1,0 +1,15 @@
+# 本地运行产物，绝不提交
+data/
+output/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.idea/
+.vscode/
+*.log

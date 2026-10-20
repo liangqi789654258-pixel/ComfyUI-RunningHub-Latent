@@ -50,6 +50,7 @@
         "blurry, watermark",
         0,
         2400,
+        1,
         5,
         true,
         false,

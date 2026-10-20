@@ -37,22 +37,24 @@ RunningHub 的参数注入接口要求必须给出 nodeId：
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
 import random
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import torch
 
-try:  # 保存 latent 用到；缺失时只影响「AV Latent 保存」节点
-    import safetensors.torch
-except Exception:  # pragma: no cover
-    safetensors = None
-
 from .core import cache as cache_mod
 from .core import client as client_mod
+from .core import errors as errors_mod
 from .core import latent as latent_mod
+from .core import ledger as ledger_mod
+from .core import mapping as mapping_mod
+from .core import output as output_mod
 from .core import settings as settings_mod
 from .core import workflow as wf_mod
 
@@ -63,20 +65,17 @@ except Exception:  # pragma: no cover
 
 CATEGORY = "RunningHub"
 
-# 输出分类用的关键字。真实接口里类型字段名并不统一（fileType / outputType / type），
-# 大小写也不统一（见过 "Latent"），所以这里统一小写后做子串匹配。
-_LATENT_HINTS = ("latent", "safetensor")
-_VIDEO_EXT = (".mp4", ".webm", ".mov", ".avi", ".gif")
-_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+# 输出分类关键字 / 占位符正则已随实现下沉到 core/output.py 与 core/mapping.py，
+# 这里不再重复定义（避免两处常量各改一半）。
 
-_PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-
-# 前端自定义事件名，web/rh_warning.js 监听它来做节点变黄
+# 前端自定义事件名，web/rh_key_guard.js 监听它来做节点变黄 / 变红
 _WARNING_EVENT = "runninghub-latent-warning"
+_ERROR_EVENT = "runninghub-latent-error"
 
 
-class RHUserError(RuntimeError):
-    """面向用户的中文错误，ComfyUI 会完整展示在前端，不做英文堆栈。"""
+# 面向用户的中文错误统一由 core.errors 生成：自带「问题类型 / 失败环节 /
+# 关键上下文 / 排查步骤」四段式。这里保留同名导出，既有引用不用改。
+RHUserError = errors_mod.RHUserError
 
 
 # ---------------------------------------------------------------------------
@@ -125,14 +124,120 @@ def _send_warning(unique_id: Any, warnings: List[str]) -> None:
         pass
 
 
+def _send_error(unique_id: Any, message: str) -> None:
+    """把诊断文案推给前端：对应节点变红并弹出常驻提示。
+
+    ComfyUI 新版前端把节点异常统一显示成「节点在执行过程中发生错误」，
+    我们精心写的报错在那儿根本出不来。所以除了 raise（日志里一定有），
+    再走自己的事件通道送一份到画布上，保证不查日志也看得到。
+    失败完全静默——这只是增强，不能因为它导致任务二次失败。
+    """
+    if not unique_id or not message:
+        return
+    try:  # pragma: no cover - ComfyUI 专有
+        from server import PromptServer
+
+        PromptServer.instance.send_sync(
+            _ERROR_EVENT,
+            {"node_id": str(unique_id), "message": str(message)},
+        )
+    except Exception:
+        pass
+
+
+def _report_error(node_title: str, err: BaseException, unique_id: Any = None) -> None:
+    """报错三连：控制台留痕 + 前端弹窗 + 抛给 ComfyUI。"""
+    text = str(err)
+    _emit("error", f"{node_title} 失败\n{text}")
+    _send_error(unique_id, text)
+
+
+@contextlib.contextmanager
+def _stage(node: str, stage: str, **context: Any) -> Iterator[None]:
+    """给某一步骤套上「失败环节」标签。
+
+    下层（client / cache）抛错时不知道用户点的是哪个节点、卡在哪一环，
+    这里补上；未分类的异常（我们自己代码的 bug）则在这里被兜底分类，
+    避免用户看到一句英文堆栈。
+    """
+    try:
+        yield
+    except RHUserError as exc:
+        refined = exc.retitled(node=node, stage=stage, extra_context=context or None)
+        if refined is exc:
+            raise
+        raise refined from exc
+    except Exception as exc:  # noqa: BLE001 - 兜底：任何异常都要变成中文诊断
+        raise errors_mod.explain(
+            exc, node=node, stage=stage, context=context or None
+        ) from exc
+
+
+def _guarded(title: str):
+    """节点执行入口的统一兜底：保证抛出去的一定是带分类的中文诊断。"""
+
+    def _decorate(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            unique_id = kwargs.get("unique_id")
+            try:
+                return func(*args, **kwargs)
+            except RHUserError as exc:
+                final = exc.retitled(node=title)
+                _report_error(title, final, unique_id)
+                if final is exc:
+                    raise
+                raise final from exc
+            except Exception as exc:  # noqa: BLE001 - 兜底
+                final = errors_mod.explain(exc, node=title)
+                _report_error(title, final, unique_id)
+                raise final from exc
+
+        return wrapper
+
+    return _decorate
+
+
+def _api_key_input() -> Tuple[str, Dict[str, Any]]:
+    """api_key 输入声明（4 个节点共用一份，避免四处各写一遍）。
+
+    语义已从「密钥输入框」变成「状态指示器」：
+      * 默认值 = `settings_mod.api_key_hint()`，有 Key 时是
+        「已配置 · 使用 config.ini」这个**无害标签**，没 Key 时是空串；
+      * 真 Key 永远不经过这个框（右键节点 →「设置 API Key」写进 config.ini）；
+        若用户仍然直接粘进来，前端会在失焦时转存并把框换回标签。
+    这样画布上永远看得到当前状态，而工作流 JSON / 导出 / PNG 元数据里没有密钥。
+    """
+    return (
+        "STRING",
+        {
+            "multiline": False,
+            "default": settings_mod.api_key_hint(),
+            "password": False,  # 值本身就是标签，需要可读；真 Key 不会留在这里
+            "placeholder": settings_mod.api_key_placeholder(),
+            "tooltip": (
+                "这个框只显示 Key 的状态，不存密钥。\n"
+                "有 Key 时显示「已配置 · 使用 config.ini」，执行时自动读取；\n"
+                "要更换 Key：右键本节点 →「设置 API Key」。\n"
+                "工作流文件 / 导出 / 图片元数据里永远不含 Key。"
+            ),
+        },
+    )
+
+
 def _resolve_api_key(raw: str) -> str:
-    key = str(settings_mod.resolve(raw, "api_key", "") or "").strip()
+    # 状态标签不是密钥：settings.resolve_api_key 会把它当未填，回落 config.ini
+    key = settings_mod.resolve_api_key(raw)
     if not key:
-        raise RHUserError(
-            "缺少 RunningHub API Key。两种配置方式任选其一：\n"
-            "  1. 直接填在节点的 api_key 输入框里；\n"
-            f"  2. 在插件目录新建 config.ini（或 config.json）写入 api_key，"
-            f"之后所有节点都不用再填。配置文件位置：{settings_mod.ini_path()}"
+        raise errors_mod.RHUserError.build(
+            errors_mod.CAT_AUTH,
+            "没有拿到 API Key：节点上没有配 Key，config.ini 里也没有。",
+            stage="读取配置",
+            context={
+                "配置文件位置": settings_mod.ini_path(),
+                "两种填法": "① 右键本节点 →「设置 API Key」（推荐，只写进 config.ini，"
+                "不进工作流/导出/图片）；② 直接在 config.ini 里写 api_key=xxx。",
+            },
         )
     return key
 
@@ -140,10 +245,21 @@ def _resolve_api_key(raw: str) -> str:
 def _resolve_workflow_id(raw: str) -> str:
     wid = str(settings_mod.resolve(raw, "default_workflow_id", "") or "").strip()
     if not wid:
-        raise RHUserError(
-            "缺少 workflow_id（RunningHub 工作流 ID）。\n"
-            "可从云端工作流页面的 URL 里取：https://www.runninghub.cn/workflow/<这里就是 ID>"
+        raise errors_mod.RHUserError.build(
+            errors_mod.CAT_WORKFLOW,
+            "没有拿到 workflow_id：节点输入框是空的，配置文件里也没有。",
+            stage="读取配置",
+            context={
+                "取值方法": "打开 runninghub.cn/workflow/<ID>，地址栏末尾那串数字就是 ID",
+                "配置文件位置": settings_mod.ini_path(),
+            },
         )
+    # 用户经常把整段 URL 粘进来（甚至带 ?tab= 参数），直接帮他抽出来，
+    # 比报一句「ID 不存在」友好得多
+    match = re.search(r"/workflow/(\d+)", wid)
+    if match:
+        wid = match.group(1)
+        _emit("input", f"已从 URL 中提取 workflow_id={wid}")
     return wid
 
 
@@ -157,131 +273,10 @@ def _make_client(api_key: str) -> "client_mod.RunningHubClient":
 # ---------------------------------------------------------------------------
 
 
-def _normalize_overrides(raw: Any) -> List[Dict[str, Any]]:
-    """把用户填写的 overrides 解析成规范 nodeInfoList。
-
-    宽容处理三件事（都是真实踩过的坑）：
-      1. 空输入
-      2. 用户写成 value 而不是 fieldValue
-      3. 单个节点字段被写成 dict 简写形式 {"3": {"seed": 1}}
-    """
-    if raw is None:
-        return []
-    if isinstance(raw, (list, dict)):
-        items: Any = raw
-    else:
-        text = str(raw).strip()
-        if not text or text in ("[]", "{}"):
-            return []
-        try:
-            items = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RHUserError(
-                f"参数映射 JSON 格式有误：第 {exc.lineno} 行第 {exc.colno} 列 —— {exc.msg}。"
-                "请检查是否漏了引号或多了逗号，标准格式形如："
-                '[{"nodeId": "3", "fieldName": "seed", "fieldValue": "123"}]'
-            ) from exc
-
-    items_list: List[Dict[str, Any]] = []
-    if isinstance(items, dict):
-        for node_id, fields in items.items():
-            if isinstance(fields, dict):
-                for field_name, value in fields.items():
-                    items_list.append(
-                        {"nodeId": str(node_id), "fieldName": str(field_name), "fieldValue": value}
-                    )
-            else:
-                # {"3": "一段文本"} 视为该节点的默认文本字段
-                items_list.append(
-                    {"nodeId": str(node_id), "fieldName": "text", "fieldValue": fields}
-                )
-    else:
-        items_list = list(items)
-
-    result: List[Dict[str, Any]] = []
-    for item in items_list:
-        if not isinstance(item, dict):
-            raise RHUserError(f"参数映射每一项都必须是对象，实际收到：{item!r}")
-        node_id = item.get("nodeId") or item.get("node_id")
-        field_name = item.get("fieldName") or item.get("field_name")
-        # 官方文档强调必须是 fieldValue，这里直接帮用户纠正写法
-        if "fieldValue" in item:
-            field_value = item["fieldValue"]
-        elif "value" in item:
-            field_value = item["value"]
-            print(
-                "[RunningHub-Latent] 已自动把 value 改写为 fieldValue"
-                f"（nodeId={node_id}, fieldName={field_name}）—— 官方接口只认 fieldValue。"
-            )
-        else:
-            raise RHUserError(
-                f"参数映射缺少 fieldValue 字段：{item}。"
-                f"正确格式：{{\"nodeId\": \"{node_id}\", \"fieldName\": \"{field_name}\", \"fieldValue\": \"你的值\"}}"
-            )
-        if node_id is None or field_name is None:
-            raise RHUserError(f"参数映射缺少 nodeId 或 fieldName：{item}")
-        result.append(
-            {"nodeId": str(node_id), "fieldName": str(field_name), "fieldValue": field_value}
-        )
-    return result
-
-
-def _apply_placeholders(
-    node_info_list: List[Dict[str, Any]], values: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-    """把 {seed} / {positive} 之类的占位符替换成 widget 的真实值。
-
-    两种形态区别对待：
-      * 整值占位符 "{seed}" -> 直接替换为原值，**保留 int/float 类型**。
-        整值替换若退化成字符串，云端收到的 seed 会是 "42" 而不是 42，
-        部分工作流会因类型不匹配报错。
-      * 混合表达式 "seed_{seed}" -> 退化为字符串插值。
-    """
-    resolved: List[Dict[str, Any]] = []
-    for item in node_info_list:
-        value = item["fieldValue"]
-        if isinstance(value, str):
-            whole = _PLACEHOLDER.fullmatch(value)
-            if whole is not None:
-                name = whole.group(1)
-                if name not in values:
-                    raise RHUserError(
-                        f"参数映射里引用了未知占位符 {{{name}}}。"
-                        f"当前可用占位符：{', '.join(sorted(values))}"
-                    )
-                value = values[name]
-            else:
-
-                def _sub(match: "re.Match[str]") -> str:
-                    name = match.group(1)
-                    if name not in values:
-                        raise RHUserError(
-                            f"参数映射里引用了未知占位符 {{{name}}}。"
-                            f"当前可用占位符：{', '.join(sorted(values))}"
-                        )
-                    return str(values[name])
-
-                value = _PLACEHOLDER.sub(_sub, value)
-        resolved.append(
-            {"nodeId": item["nodeId"], "fieldName": item["fieldName"], "fieldValue": value}
-        )
-    return resolved
-
-
-def _merge_injections(
-    *groups: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """合并多组注入项，后者覆盖前者（按 nodeId + fieldName 去重）。
-
-    优先级：用户手工映射 > 自动定位。这样极简版自动找到的结果可以被用户在
-    专业版里覆盖，不会出现「改了没反应」。
-    """
-    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for group in groups:
-        for item in group or []:
-            merged[(str(item.get("nodeId", "")), str(item.get("fieldName", "")))] = item
-    # 按 nodeId / fieldName 排序，保证缓存键稳定
-    return [merged[k] for k in sorted(merged.keys())]
+# 参数映射解析与占位符替换已下沉到 core/mapping.py（插件与出图器共用一份）。
+_normalize_overrides = mapping_mod.normalize_overrides
+_apply_placeholders = mapping_mod.apply_placeholders
+_merge_injections = mapping_mod.merge_injections
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -300,87 +295,11 @@ def _preview(text: str, limit: int = 60) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _output_type_of(item: Dict[str, Any]) -> str:
-    """取出输出类型字符串并统一小写。
-
-    真实接口里这个字段见过 fileType / outputType / type 三种名字，
-    值也见过 "latent" / "Latent" 混用，所以：多个名字都读 + 一律小写。
-    """
-    for key in ("fileType", "outputType", "type", "file_type", "output_type"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip().lower()
-    return ""
-
-
-def _classify(item: Dict[str, Any]) -> str:
-    """判断一个输出文件是 latent / image / video / unknown。"""
-    file_type = _output_type_of(item)
-    url = str(item.get("fileUrl", "") or item.get("url", "") or "").lower()
-    # 去掉查询串再取扩展名（带签名的 URL 末尾通常是 ?token=...）
-    url = url.split("?", 1)[0]
-
-    # .h3latent / .avlatent 是社区「H3 音视频 latent 保存节点」用的扩展名，
-    # 一并认作 latent，否则这类文件会被判成 unknown 而取不到。
-    if any(h in file_type for h in _LATENT_HINTS) or url.endswith(
-        (".latent", ".safetensors", ".h3latent", ".avlatent")
-    ):
-        return "latent"
-    if url.endswith(_VIDEO_EXT) or file_type in ("mp4", "webm"):
-        return "video"
-    if url.endswith(_IMAGE_EXT) or file_type in ("png", "jpg", "jpeg", "webp"):
-        return "image"
-    return "unknown"
-
-
-def _collect_latents(outputs: List[Dict[str, Any]], raw_hint: str = "") -> List[Dict[str, Any]]:
-    """筛出所有 latent 输出并按稳定顺序排序。找不到时给出可操作的中文指引。"""
-    candidates = [o for o in outputs if _classify(o) == "latent"]
-    if not candidates:
-        summary: List[str] = []
-        for item in outputs:
-            kind = _classify(item)
-            summary.append(
-                f"  - [{kind}] {item.get('fileUrl', item.get('url', ''))} "
-                f"(nodeId={item.get('nodeId', '?')}, "
-                f"类型字段={_output_type_of(item) or '缺失'})"
-            )
-        detail = "\n".join(summary) if summary else "  （云端返回的输出列表为空）"
-        extra = f"\n云端原始返回（供排错）：\n{raw_hint}" if raw_hint else ""
-
-        raise RHUserError(
-            "云端任务已完成，但没有识别出 latent 文件。\n"
-            f"本次云端实际输出：\n{detail}\n{extra}\n\n"
-            "请按顺序排查：\n"
-            "  1. 云端工作流末端必须接「保存Latent」节点，而不是「保存图像」；\n"
-            "  2. 「保存Latent」节点要能真正被执行到（不能被下游节点短路）；\n"
-            "  3. 若上面显示类型字段为「缺失」，说明云端返回结构有变，"
-            "请把上面这段原始返回发给插件作者，我会加进兼容列表。"
-        )
-
-    candidates.sort(key=lambda o: (str(o.get("nodeId", "")), str(o.get("fileUrl", ""))))
-    return candidates
-
-
-def _merge_latents(tensors: List[torch.Tensor]) -> torch.Tensor:
-    """把多个输出的 latent 沿 batch 维合并。
-
-    形状一致时合并成一个 batch（这也正是 ComfyUI 原生 SaveLatent 多图输出的语义）；
-    形状不一致时不做猜测，直接取第一个并给出提示。
-    """
-    if len(tensors) == 1:
-        return tensors[0]
-
-    first_shape = tuple(tensors[0].shape[1:])
-    if all(tuple(t.shape[1:]) == first_shape for t in tensors[1:]):
-        return torch.cat(tensors, dim=0)
-
-    print(
-        "[RunningHub-Latent] 警告：云端输出了多个尺寸的 latent，无法沿 batch 维合并，"
-        "本次仅取第一个。请检查云端工作流是否混接了多个分辨率的生成分支。"
-        "（警告：其余 latent 已被丢弃，如需全部结果请拆成多个节点分别取回。）"
-    )
-    return tensors[0]
+# 输出识别已下沉到 core/output.py（插件与出图器共用一份）。
+_output_type_of = output_mod.output_type_of
+_classify = output_mod.classify
+_collect_latents = output_mod.collect_latents
+_merge_latents = output_mod.merge_latents
 
 
 def _fetch_latent_blob(url: str, timeout: float = 120.0) -> bytes:
@@ -404,14 +323,40 @@ def _describe_samples(samples: Any) -> str:
 
 
 def _load_latent(blob: bytes, url: str) -> dict:
+    """下载到的字节 -> ComfyUI LATENT。解析失败要说出「下下来的是什么」。"""
     try:
         return latent_mod.parse(blob, url)
     except latent_mod.LatentParseError as exc:
-        raise RHUserError(
-            f"latent 文件下载成功但解析失败：{exc}\n"
-            f"下载地址：{url}\n"
-            "这通常意味着云端工作流末端接的不是标准「保存Latent」节点。"
+        raise errors_mod.RHUserError.build(
+            errors_mod.CAT_PARSE,
+            f"latent 文件下载成功但解析失败：{errors_mod.truncate(exc, 300)}",
+            stage="解析 latent 文件",
+            context={
+                "下载地址": errors_mod.truncate(url, 200),
+                "文件大小": f"{len(blob) / 1024:.0f} KB",
+                "文件头猜测": _sniff_kind(blob),
+            },
         ) from exc
+
+
+def _sniff_kind(blob: bytes) -> str:
+    """按文件头猜一下下载到的到底是什么，帮用户判断是不是下错了东西。"""
+    if not blob:
+        return "空文件（0 字节）"
+    head = blob[:16]
+    if latent_mod.looks_like_safetensors(blob):
+        return "safetensors / .latent（符合预期）"
+    if head[:4] == b"PK\x03\x04":
+        return "ZIP 压缩包"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "PNG 图片 —— 云端末端接的是「保存图像」，请改成「保存Latent」"
+    if head[:4] == bytes.fromhex("00000020") or head[4:8] == b"ftyp":
+        return "MP4 视频 —— 云端末端接的是「保存视频」，请改成「保存Latent」"
+    if head[:1] in (b"<", b"{"):
+        return "HTML / JSON 文本 —— 多半是错误页或接口返回，不是 latent 文件"
+    if head[:6] == b"NUMPY\x01":
+        return "npy 数组"
+    return f"未知格式（前 8 字节：{head[:8]!r}）"
 
 
 def _resolve_outputs_to_latent(
@@ -489,15 +434,37 @@ def _require_prompt_targets(
         if "{" + token + "}" in overrides_json:
             continue
         reason = wf_mod.prompt_link_diagnosis(structure, token)
-        raise RHUserError(
+        # 字段名必须给**真实的**那个：写死 "text" 会让人照抄后被 803 打回
+        targets = wf_mod.suggest_text_targets(structure)
+        if targets:
+            best_id, best_field = targets[0]
+            example = (
+                f'  {{"nodeId": "{best_id}", "fieldName": "{best_field}", '
+                f'"fieldValue": "{{{token}}}"}}'
+            )
+            example_note = (
+                f"已按云端真实字段生成（候选第一个：nodeId={best_id}.{best_field}）；"
+                f"若该节点不是提示词节点，请换成上面定位结果里列出的其它候选。"
+            )
+        else:
+            example = (
+                f'  {{"nodeId": "<ID>", "fieldName": "<字段名>", '
+                f'"fieldValue": "{{{token}}}"}}'
+            )
+            example_note = "云端没有可写入的文本字段，请先到云端把提示词节点改成字面量输入。"
+
+        raise errors_mod.RHUserError.build(
+            errors_mod.CAT_MAPPING,
             f"{label}已填写，但云端工作流里没有 {{{token}}} 占位符，"
             f"参数映射里也没有引用 {{{token}}} —— 本次不会有任何提示词被送到云端，"
-            "继续跑只会拿到云端默认文案（静默失效，比报错更糟）。\n"
-            f"定位结果：{reason}\n"
-            "请在参数映射里补一条（复制后把 nodeId 换成你自己的）：\n"
-            f'  {{"nodeId": "<ID>", "fieldName": "text", "fieldValue": "{{{token}}}"}}\n'
-            f"nodeId 用「RH 工作流参数探查」节点查询；"
-            f"也可以在云端文本节点的文本框里写上 {{{token}}} 标记，本节点会自动替换。"
+            "继续跑只会拿到云端默认文案（静默失效，比报错更糟）。",
+            stage="定位提示词落点",
+            context={
+                "定位结果": reason,
+                "可照抄的修法": example_note + "\n" + example,
+                "另一个办法": f"在云端文本节点的文本框里写上 {{{token}}} 标记，"
+                "本节点会自动替换。",
+            },
         )
 
 
@@ -650,6 +617,53 @@ def _submit_task(
 # ---------------------------------------------------------------------------
 
 
+def _prevalidate_injections(
+    structure: Optional[Dict[str, Any]],
+    node_info_list: List[Dict[str, Any]],
+    warnings: List[str],
+) -> None:
+    """提交前本地预校验：把注定被 803 拒绝的映射拦在本地，不花云端钱试错。
+
+    复用 workflow 层的逐条诊断（nodeId / fieldName 不存在 = 致命，直接报错；
+    指向连线字段 = 注入不生效但平台不拦，降级为警告）。结构没读到时跳过。
+    """
+    if not structure or not node_info_list:
+        return
+    fatal, linked = wf_mod.split_injection_problems(structure, node_info_list)
+    if fatal:
+        raise errors_mod.RHUserError.build(
+            errors_mod.CAT_MAPPING,
+            f"参数映射里有 {len(fatal)} 条指向了云端工作流中不存在的落点，"
+            "提交上去只会收到 803 错误（不发任务、但白折腾一轮）。",
+            stage="提交前本地预校验",
+            context={
+                "问题明细": "；".join(fatal),
+                "本次映射条数": len(node_info_list),
+                "核对依据": "云端工作流结构（getJsonApiFormat）",
+            },
+            actions=(
+                "用「RH 工作流参数探查」节点重新拉一次清单，"
+                "核对 nodeId 与 fieldName 的真实拼写；",
+                "若刚在云端改过工作流：改动必须先在平台保存，本地拉到的才是新结构。",
+            ),
+        )
+    for problem in linked:
+        warnings.append(f"参数映射警告：{problem}")
+
+
+def _query_coins(client: "client_mod.RunningHubClient") -> Optional[float]:
+    """查询当前积分余额。查询失败返回 None——积分显示是锦上添花，不能连累任务。"""
+    try:
+        data = client.get_account_status()
+        raw = data.get("remainCoins", data.get("remain_coins"))
+        if raw is None:
+            return None
+        return float(raw)
+    except Exception as exc:
+        print(f"[RunningHub-Latent] 积分查询失败（不影响任务）：{errors_mod.truncate(exc, 120)}")
+        return None
+
+
 def _run_sampling(
     client: "client_mod.RunningHubClient",
     workflow_id: str,
@@ -662,10 +676,16 @@ def _run_sampling(
     warnings: List[str],
     unique_id: Any = None,
     structure: Optional[Dict[str, Any]] = None,
+    node: str = "",
+    timeout_retries: int = 0,
+    query_coins: bool = True,
 ) -> Tuple[Dict[str, torch.Tensor], str, List[str]]:
     """提交 -> 轮询 -> 下载 -> 组装报告。两个版本节点共用。
 
-    `structure` 只用于 803 的逐条定位（提交失败时拿它逐条核对 nodeInfoList）。
+    `structure` 用于 803 的逐条定位 + 提交前的映射预校验。
+    `node` 是节点显示名，只用于给报错补上「哪个节点、哪一环」。
+    `timeout_retries` 是轮询超时后的自动续等次数（0 = 超时立即报错），
+    应对「任务在排队、600 秒不够」的场景——已付费的任务不该被本地计时器判死。
 
     返回 (latent, task_id, report_lines)。
     """
@@ -677,14 +697,32 @@ def _run_sampling(
             _emit("generator", f"命中本地缓存，跳过云端调用：{hit}")
             with open(hit, "rb") as fh:
                 blob = fh.read()
-            result = _load_latent(blob, hit)
+            with _stage(node, "读取本地 latent 缓存", 缓存文件=hit):
+                result = _load_latent(blob, hit)
             lines = [
                 "命中本地缓存，本次未消耗云端额度。",
                 f"工作流 ID：{workflow_id}",
                 f"缓存文件：{hit}",
                 f"张量形状：{_describe_samples(result.get('samples'))}",
             ]
+            ledger_mod.append_record(
+                {
+                    "node": node,
+                    "task_id": "cached",
+                    "workflow_id": workflow_id,
+                    "outcome": "cached",
+                    "elapsed_s": 0,
+                    "coins_spent": 0,
+                    "latent_shape": _describe_samples(result.get("samples")),
+                }
+            )
             return (result, "cached", lines)
+
+    # ---- 提交前准备：预校验 + 计时 + 积分基线 ------------------------------
+    _prevalidate_injections(structure, node_info_list, warnings)
+
+    t0 = time.time()
+    coins_before = _query_coins(client) if query_coins else None
 
     pbar = _make_progress(5)
 
@@ -692,81 +730,164 @@ def _run_sampling(
         _emit("generator", label)
 
     _on_stage("提交中")
-    task_id = _submit_task(
-        client, workflow_id, node_info_list, structure, use_high_performance
-    )
-    _emit("generator", f"任务已提交，taskId={task_id}")
-    pbar.update(1)
-
-    def _on_progress(label: str, elapsed: float) -> None:
-        pbar.update(1)
-        _emit("generator", f"{label}（已用时 {elapsed:.0f} 秒）")
-
-    outputs = client.wait_for_outputs(
-        task_id,
-        poll_interval=float(poll_interval),
-        timeout=float(timeout),
-        on_progress=_on_progress,
-    )
-    pbar.update(1)
-
-    if not outputs:
-        # 状态已成功但补查后依然拿不到文件：任务钱已经花了，必须给出可挽回的路径
-        raise RHUserError(
-            f"云端任务 {task_id} 已返回成功，但反复查询都拿不到输出文件。\n"
-            "可能原因：\n"
-            "  1. 云端工作流没有任何输出节点（末端既没接保存Latent也没接保存图像）；\n"
-            "  2. 云端文件已过期被清理（较久之前的任务）。\n"
-            f"请记下 taskId 稍后重试：{task_id}"
+    with _stage(
+        node,
+        "提交任务到云端",
+        工作流ID=workflow_id,
+        参数注入条数=len(node_info_list),
+    ):
+        task_id = _submit_task(
+            client, workflow_id, node_info_list, structure, use_high_performance
         )
-
-    def _stage(text: str) -> None:
-        _emit("generator", text)
+    # 从这里起任务已经付费：之后任何失败都值得留台账（含 taskId 可续取）
+    try:
+        _emit("generator", f"任务已提交，taskId={task_id}")
         pbar.update(1)
 
-    result, urls, stored = _resolve_outputs_to_latent(
-        outputs,
-        cache_key if use_cache else None,
-        client=client,
-        on_stage=_stage,
-    )
-    shape = tuple(result["samples"].shape)
-    kind = "视频 latent（5 维）" if len(shape) == 5 else "图像 latent（4 维）"
-    if latent_mod.is_nested(result.get("samples")):
-        kind = "音视频复合 latent（MiniMax H3 等）"
+        def _on_progress(label: str, elapsed: float) -> None:
+            pbar.update(1)
+            _emit("generator", f"{label}（已用时 {elapsed:.0f} 秒）")
 
-    other = [o for o in outputs if _classify(o) != "latent"]
-    lines = [
-        f"云端采样完成，本地已获得 {kind}。",
-        f"taskId：{task_id}",
-        f"工作流 ID：{workflow_id}",
-        f"张量形状：{_describe_samples(result.get('samples'))}（batch={shape[0]}）",
-        f"生效随机种子：{effective_seed}",
-    ]
-    if len(urls) > 1:
+        # 轮询 + 超时自动续等：排队 600 秒不稀奇，已付费的任务不该被本地计时器判死
+        rounds_left = max(0, int(timeout_retries))
+        while True:
+            try:
+                with _stage(
+                    node,
+                    "等待云端采样完成",
+                    taskId=task_id,
+                    轮询超时=f"{float(timeout):.0f} 秒"
+                    + (f" × 最多 {rounds_left + 1} 轮" if rounds_left else ""),
+                ):
+                    outputs = client.wait_for_outputs(
+                        task_id,
+                        poll_interval=float(poll_interval),
+                        timeout=float(timeout),
+                        on_progress=_on_progress,
+                    )
+                break
+            except client_mod.TaskTimeoutError as exc:
+                if rounds_left <= 0:
+                    raise
+                rounds_left -= 1
+                _emit(
+                    "generator",
+                    f"轮询超时，任务可能仍在排队，自动续等（剩余 {rounds_left} 次）："
+                    f"taskId={task_id}",
+                )
+        pbar.update(1)
+
+        if not outputs:
+            # 状态已成功但补查后依然拿不到文件：任务钱已经花了，必须给出可挽回的路径
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_CLOUD,
+                f"云端任务 {task_id} 已返回成功，但反复查询都拿不到输出文件。",
+                node=node,
+                stage="等待云端采样完成",
+                context={
+                    "taskId": task_id,
+                    "工作流 ID": workflow_id,
+                    "可能原因": "① 云端工作流末端没有输出节点（既没接保存Latent 也没接保存图像）；"
+                    "② 云端结果文件已过期被清理。",
+                    "补救办法": "记住上面的 taskId，用「RH 按任务号取回」节点再试一次；"
+                    "仍取不到就到 RunningHub 网页端看该任务的输出列表。",
+                },
+            )
+
+        # 注意：这里不能叫 `_stage`——函数体内任何同名赋值都会把模块级
+        # `_stage(node, stage, ...)` 上下文管理器遮蔽成局部名，前面的
+        # `with _stage(...)` 就会 UnboundLocalError（此坑真实炸过一次）。
+        def _announce(text: str) -> None:
+            _emit("generator", text)
+            pbar.update(1)
+
+        with _stage(node, "下载并解析云端 latent 文件", taskId=task_id):
+            result, urls, stored = _resolve_outputs_to_latent(
+                outputs,
+                cache_key if use_cache else None,
+                client=client,
+                on_stage=_announce,
+            )
+        elapsed_s = time.time() - t0
+        shape = tuple(result["samples"].shape)
+        kind = "视频 latent（5 维）" if len(shape) == 5 else "图像 latent（4 维）"
+        if latent_mod.is_nested(result.get("samples")):
+            kind = "音视频复合 latent（MiniMax H3 等）"
+
+        # ---- 积分结算 ---------------------------------------------------------
+        coins_after = _query_coins(client) if query_coins else None
+        coins_spent: Optional[float] = None
+        if coins_before is not None and coins_after is not None:
+            coins_spent = round(coins_before - coins_after, 2)
+
+        lines = [
+            f"云端采样完成，本地已获得 {kind}。",
+            f"taskId：{task_id}",
+            f"工作流 ID：{workflow_id}",
+            f"张量形状：{_describe_samples(result.get('samples'))}（batch={shape[0]}）",
+            f"生效随机种子：{effective_seed}",
+        ]
+        if coins_spent is not None:
+            line = f"本次积分消耗：约 {coins_spent:g}（任务前 {coins_before:g} → 任务后 {coins_after:g}）"
+            if coins_spent < 0:
+                line += "。负数说明期间账户还有其他任务在并发扣费，差值仅供参考。"
+            lines.append(line)
+        elif query_coins:
+            lines.append("本次积分消耗：未能查询（接口失败或字段缺失），请到 RunningHub 控制台核对。")
+        lines.append(f"整体用时：{elapsed_s:.0f} 秒（含提交、排队、采样、下载）。")
+        if len(urls) > 1:
+            lines.append(
+                f"云端共输出 {len(urls)} 个 latent，已沿 batch 维合并为 {shape[0]} 个结果。"
+            )
         lines.append(
-            f"云端共输出 {len(urls)} 个 latent，已沿 batch 维合并为 {shape[0]} 个结果。"
+            f"latent 缓存路径：{stored}" if stored
+            else "本次未写入本地缓存（多个 latent 输出时不缓存）。"
         )
-    lines.append(
-        f"latent 缓存路径：{stored}" if stored
-        else "本次未写入本地缓存（多个 latent 输出时不缓存）。"
-    )
-    if other:
-        lines.append(
-            f"注意：云端还额外输出了 {len(other)} 个非 latent 文件，本次已忽略。"
-            "建议到云端工作流删除这些输出节点，避免不必要的额度消耗。"
+        if other := [o for o in outputs if _classify(o) != "latent"]:
+            lines.append(
+                f"注意：云端还额外输出了 {len(other)} 个非 latent 文件，本次已忽略。"
+                "建议到云端工作流删除这些输出节点，避免不必要的额度消耗。"
+            )
+        lines.append("下一步：把 latent 接到本地 VAEDecode / VAEDecodeTiled 即可出图。")
+
+        ledger_mod.append_record(
+            {
+                "node": node,
+                "task_id": task_id,
+                "workflow_id": workflow_id,
+                "outcome": "success",
+                "elapsed_s": round(elapsed_s, 1),
+                "coins_spent": coins_spent,
+                "coins_before": coins_before,
+                "coins_after": coins_after,
+                "latent_shape": f"{shape[0:2]}…",
+                "seed": effective_seed,
+            }
         )
-    lines.append("下一步：把 latent 接到本地 VAEDecode / VAEDecodeTiled 即可出图。")
 
-    if warnings:
-        lines.append("")
-        lines.append(f"⚠️ 本次执行有 {len(warnings)} 条警告：")
-        lines.extend(f"  ⚠️ {w}" for w in warnings)
-        _send_warning(unique_id, warnings)
+        if warnings:
+            lines.append("")
+            lines.append(f"⚠️ 本次执行有 {len(warnings)} 条警告：")
+            lines.extend(f"  ⚠️ {w}" for w in warnings)
+            _send_warning(unique_id, warnings)
 
-    pbar.update(1)
-    _emit("generator", "完成")
-    return (result, task_id, lines)
+        pbar.update(1)
+        _emit("generator", "完成")
+        return (result, task_id, lines)
+    except BaseException as exc:
+        ledger_mod.append_record(
+            {
+                "node": node,
+                "task_id": task_id,
+                "workflow_id": workflow_id,
+                "outcome": "failed",
+                "elapsed_s": round(time.time() - t0, 1),
+                "coins_before": coins_before,
+                "error_category": getattr(exc, "category", "unknown"),
+                "error_reason": errors_mod.truncate(str(exc), 200),
+            }
+        )
+        raise
 
 
 def _auto_injections(
@@ -802,12 +923,39 @@ def _auto_injections(
     return (injections, structure, stats, seed_targets)
 
 
-def _warn_missing_structure(warnings: List[str]) -> None:
+def _warn_missing_structure(
+    warnings: List[str], client: Optional["client_mod.RunningHubClient"] = None
+) -> None:
+    """结构读不到时的降级警告。
+
+    以前这里只有一句「没能读到结构」，用户无从判断是 Key 错了、ID 错了
+    还是网络断了。现在把 client 记下的失败原因一并带上：错误码、服务端原话、
+    以及按分类给出的排查方向。
+    """
+    head = "没能读到云端工作流结构，自动注入已跳过（提示词 / 种子将沿用云端默认值）。"
+    err: Optional[errors_mod.RHUserError] = None
+    if client is not None:
+        try:
+            err = client.last_structure_error()
+        except Exception:  # pragma: no cover
+            err = None
+
+    if err is None:
+        warnings.append(
+            head
+            + "\n请确认工作流 ID 正确且已保存（草稿状态无法被调用）；"
+            "若持续失败，请在参数映射里手动填 nodeId / fieldName"
+            "（用「RH 工作流参数探查」或在 RunningHub 网页编辑器里查 ID）。"
+        )
+        return
+
+    category = getattr(err, "category", errors_mod.CAT_UNKNOWN)
+    steps = errors_mod.ACTIONS.get(category) or errors_mod.ACTIONS[errors_mod.CAT_UNKNOWN]
     warnings.append(
-        "没能读到云端工作流结构，自动注入已跳过（提示词/种子将沿用云端默认值）。"
-        "请确认工作流 ID 正确且已保存（草稿状态无法被调用）；"
-        "若持续失败，请在参数映射里手动填 nodeId / fieldName"
-        "（用「RH 工作流参数探查」或在 RunningHub 网页编辑器里查 ID）。"
+        head
+        + f"\n问题类型：{errors_mod.CAT_TITLES.get(category, errors_mod.CAT_TITLES[errors_mod.CAT_UNKNOWN])}"
+        + f"\n失败原因：{errors_mod.truncate(err, 400)}"
+        + "\n怎么排查：\n" + "\n".join(f"  {i}. {s}" for i, s in enumerate(steps[:3], 1))
     )
 
 
@@ -840,15 +988,7 @@ class RunningHubLatentGeneratorSimple:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": (
-                    "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "placeholder": "留空则读取 config.ini / config.json",
-                        "tooltip": "RunningHub API Key。留空则自动读取插件目录下的 config.ini。",
-                    },
-                ),
+                "api_key": _api_key_input(),
                 "workflow_id": (
                     "STRING",
                     {
@@ -884,6 +1024,8 @@ class RunningHubLatentGeneratorSimple:
     def VALIDATE_INPUTS(cls, **kwargs) -> bool:
         return True
 
+    # 报错里要写清「哪个节点失败」，这里用字面量与 TITLE 保持一致
+    @_guarded("RH 云端采样 · 极简版")
     def execute(
         self,
         api_key: str,
@@ -897,6 +1039,10 @@ class RunningHubLatentGeneratorSimple:
         # 无 widget 的参数全部走配置文件，给高级用户留调节口
         timeout = float(settings_mod.get("timeout", 600.0))
         poll_interval = float(settings_mod.get("poll_interval", 5.0))
+        timeout_retries = int(float(settings_mod.get("timeout_retries", 1)))
+        query_coins = str(settings_mod.get("query_coins", True)).strip().lower() not in (
+            "false", "0", "no", "off",
+        )
         use_cache = str(settings_mod.get("use_cache", True)).strip().lower() not in (
             "false", "0", "no", "off",
         )
@@ -911,13 +1057,14 @@ class RunningHubLatentGeneratorSimple:
         # 要改云端参数请换「专业版」（它有 node_overrides 映射框）。
         resolved_overrides: List[Dict[str, Any]] = []
 
-        injections, _structure, _stats, seed_targets = _auto_injections(
-            client, workflow_id, "", "", effective_seed
-        )
+        with _stage("RH 云端采样 · 极简版", "读取云端工作流结构", 工作流ID=workflow_id):
+            injections, _structure, _stats, seed_targets = _auto_injections(
+                client, workflow_id, "", "", effective_seed
+            )
         node_info_list = _merge_injections(injections, resolved_overrides)
 
         if not _structure:
-            _warn_missing_structure(warnings)
+            _warn_missing_structure(warnings, client)
         else:
             # 映射写错会在提交时被平台 803 整包拒绝，这里先本地逐条体检，
             # 能省一次「跑完才知道错了」的往返。
@@ -954,6 +1101,9 @@ class RunningHubLatentGeneratorSimple:
             warnings,
             unique_id,
             structure=_structure,
+            node="RH 云端采样 · 极简版",
+            timeout_retries=timeout_retries,
+            query_coins=query_coins,
         )
         return (result, task_id, "\n".join(lines))
 
@@ -974,15 +1124,7 @@ class RunningHubLatentGenerator:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": (
-                    "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "placeholder": "留空则读取 config.ini / config.json",
-                        "tooltip": "RunningHub API Key。留空则自动读取插件目录下的 config.ini。",
-                    },
-                ),
+                "api_key": _api_key_input(),
                 "workflow_id": (
                     "STRING",
                     {
@@ -1042,6 +1184,20 @@ class RunningHubLatentGenerator:
                 ),
                 "seed": ("INT", {"default": 0, "min": -1, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
                 "timeout": ("INT", {"default": 600, "min": 60, "max": 3600, "step": 10}),
+                "timeout_retries": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 5,
+                        "step": 1,
+                        "tooltip": (
+                            "轮询超时后的自动续等次数。0 = 超时立即报错；\n"
+                            "1~5 = 每次超时自动再等一轮（等价于 timeout×(n+1)），\n"
+                            "应对云端排队久、已付费的任务不该被本地计时器判死。"
+                        ),
+                    },
+                ),
                 "poll_interval": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 60.0, "step": 0.5}),
                 "use_cache": ("BOOLEAN", {"default": True}),
                 "use_high_performance": ("BOOLEAN", {"default": False}),
@@ -1066,6 +1222,7 @@ class RunningHubLatentGenerator:
     def VALIDATE_INPUTS(cls, **kwargs) -> bool:
         return True
 
+    @_guarded("RH 云端采样 · 专业版")
     def execute(
         self,
         api_key: str,
@@ -1075,15 +1232,19 @@ class RunningHubLatentGenerator:
         negative: str,
         seed: int,
         timeout: int,
-        poll_interval: float,
-        use_cache: bool,
-        use_high_performance: bool,
+        timeout_retries: int = 1,
+        poll_interval: float = 5.0,
+        use_cache: bool = True,
+        use_high_performance: bool = False,
         validate_mapping: bool = True,
         unique_id: Any = None,
     ) -> Tuple[Dict[str, torch.Tensor], str, str]:
         api_key = _resolve_api_key(api_key)
         workflow_id = _resolve_workflow_id(workflow_id)
         client = _make_client(api_key)
+        query_coins = str(settings_mod.get("query_coins", True)).strip().lower() not in (
+            "false", "0", "no", "off",
+        )
 
         effective_seed = random.randint(0, 0xFFFFFFFFFFFFFFFF) if seed < 0 else int(seed)
         overrides = _normalize_overrides(node_overrides)
@@ -1097,11 +1258,12 @@ class RunningHubLatentGenerator:
         warnings: List[str] = []
 
         # 第一步：自动注入（与极简版同一套占位符替换逻辑）
-        injections, structure, stats, seed_targets = _auto_injections(
-            client, workflow_id, positive, negative, effective_seed
-        )
+        with _stage("RH 云端采样 · 专业版", "读取云端工作流结构", 工作流ID=workflow_id):
+            injections, structure, stats, seed_targets = _auto_injections(
+                client, workflow_id, positive, negative, effective_seed
+            )
         if not structure:
-            _warn_missing_structure(warnings)
+            _warn_missing_structure(warnings, client)
 
         # 第二步：手工映射叠加在自动注入之上，同字段以手工映射为准
         node_info_list = _merge_injections(injections, resolved_overrides)
@@ -1153,6 +1315,9 @@ class RunningHubLatentGenerator:
             warnings,
             unique_id,
             structure=structure,
+            node="RH 云端采样 · 专业版",
+            timeout_retries=int(timeout_retries),
+            query_coins=query_coins,
         )
         # 回显真正送进云端的提示词——排查「提示词不生效」最快的一眼定位点
         previews: List[str] = []
@@ -1177,19 +1342,26 @@ class RunningHubLatentFetch:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": (
-                    "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "placeholder": "留空则读取 config.ini / config.json",
-                    },
-                ),
+                "api_key": _api_key_input(),
                 "task_id": (
                     "STRING",
                     {"multiline": False, "default": "", "placeholder": "上一次生成的任务号"},
                 ),
                 "timeout": ("INT", {"default": 600, "min": 60, "max": 3600, "step": 10}),
+                "timeout_retries": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 0,
+                        "max": 5,
+                        "step": 1,
+                        "tooltip": (
+                            "轮询超时后的自动续等次数。0 = 超时立即报错；\n"
+                            "1~5 = 每次超时自动再等一轮（等价于 timeout×(n+1)），\n"
+                            "应对云端排队久、已付费的任务不该被本地计时器判死。"
+                        ),
+                    },
+                ),
                 "poll_interval": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 60.0, "step": 0.5}),
             }
         }
@@ -1200,24 +1372,60 @@ class RunningHubLatentFetch:
     CATEGORY = CATEGORY
     TITLE = "RH 按任务号取回 Latent"
 
+    @_guarded("RH 按任务号取回 Latent")
     def execute(
-        self, api_key: str, task_id: str, timeout: int, poll_interval: float
+        self,
+        api_key: str,
+        task_id: str,
+        timeout: int,
+        timeout_retries: int = 1,
+        poll_interval: float = 5.0,
     ) -> Tuple[Dict[str, torch.Tensor], str]:
         task_id = str(task_id).strip()
         if not task_id:
-            raise RHUserError("task_id 为空。请填入上一次生成的任务号。")
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_INPUT,
+                "task_id 是空的，没有可查询的任务。",
+                node="RH 按任务号取回 Latent",
+                context={
+                    "取值方法": "task_id 是「RH 云端采样」节点第二个输出口（task_id）给的数字串；"
+                    "超时报错里也会带上它，照抄过来即可续取结果。"
+                },
+            )
 
         api_key = _resolve_api_key(api_key)
         client = _make_client(api_key)
 
-        outputs = client.wait_for_outputs(
-            task_id, poll_interval=float(poll_interval), timeout=float(timeout)
-        )
+        rounds_left = max(0, int(timeout_retries))
+        while True:
+            try:
+                with _stage("RH 按任务号取回 Latent", "按 taskId 查询云端结果", taskId=task_id):
+                    outputs = client.wait_for_outputs(
+                        task_id, poll_interval=float(poll_interval), timeout=float(timeout)
+                    )
+                break
+            except client_mod.TaskTimeoutError:
+                if rounds_left <= 0:
+                    raise
+                rounds_left -= 1
+                _emit(
+                    "generator",
+                    f"轮询超时，任务可能仍在排队，自动续等（剩余 {rounds_left} 次）",
+                )
         if not outputs:
-            raise RHUserError(
-                f"任务 {task_id} 已返回成功但拿不到输出文件，可能已过期被清理。"
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_DOWNLOAD,
+                f"任务 {task_id} 已返回成功，但拿不到输出文件。",
+                node="RH 按任务号取回 Latent",
+                stage="按 taskId 查询云端结果",
+                context={
+                    "taskId": task_id,
+                    "最常见原因": "云端结果文件有有效期，过期会被清理，只能重跑一次任务。",
+                    "其它可能": "该任务本来就没有输出节点；或 task_id 抄错了。",
+                },
             )
-        result, urls, _ = _resolve_outputs_to_latent(outputs, client=client)
+        with _stage("RH 按任务号取回 Latent", "下载并解析云端 latent 文件", taskId=task_id):
+            result, urls, _ = _resolve_outputs_to_latent(outputs, client=client)
         report = (
             f"已从云端任务 {task_id} 取回 latent。\n"
             f"下载地址：{chr(10).join('  ' + u for u in urls)}\n"
@@ -1252,11 +1460,22 @@ class RunningHubLatentFromUrl:
     CATEGORY = CATEGORY
     TITLE = "RH 从 URL 加载 Latent"
 
+    @_guarded("RH 从 URL 加载 Latent")
     def execute(self, url: str, timeout: int) -> Tuple[Dict[str, torch.Tensor], str]:
         url = str(url).strip()
         if not url:
-            raise RHUserError("URL 为空。")
-        result = _load_latent(_fetch_latent_blob(url, timeout=float(timeout)), url)
+            raise errors_mod.RHUserError.build(
+                errors_mod.CAT_INPUT,
+                "URL 是空的，没有可加载的文件。",
+                node="RH 从 URL 加载 Latent",
+                context={
+                    "取值方法": "从 RunningHub 任务输出列表里右键复制 latent 文件的下载地址；"
+                    "注意直链带签名且会过期（通常 14 天）。"
+                },
+            )
+        with _stage("RH 从 URL 加载 Latent", "下载 latent 文件", 下载地址=url):
+            blob = _fetch_latent_blob(url, timeout=float(timeout))
+        result = _load_latent(blob, url)
         return (result, f"已加载 {url}\n张量形状：{_describe_samples(result.get('samples'))}")
 
 
@@ -1272,14 +1491,7 @@ class RunningHubWorkflowInspector:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "api_key": (
-                    "STRING",
-                    {
-                        "multiline": False,
-                        "default": "",
-                        "placeholder": "留空则读取 config.ini / config.json",
-                    },
-                ),
+                "api_key": _api_key_input(),
                 "workflow_id": (
                     "STRING",
                     {"multiline": False, "default": "", "placeholder": "RunningHub 工作流 ID"},
@@ -1302,8 +1514,18 @@ class RunningHubWorkflowInspector:
         structure = client.get_workflow_structure(workflow_id)
 
         if not structure:
+            # 探查节点本来就是「用来排查」的，拉不到结构时把诊断直接打在
+            # 输出里比抛异常更好用——用户要的就是这份清单。
+            reason: Optional[errors_mod.RHUserError] = None
+            try:
+                reason = client.last_structure_error()
+            except Exception:  # pragma: no cover
+                reason = None
+            if reason is not None:
+                return (f"未能读取工作流 {workflow_id} 的结构。\n\n{reason}",)
             return (
-                f"未能读取工作流 {workflow_id} 的结构。\n"
+                f"未能读取工作流 {workflow_id} 的结构，且云端没有返回明确的错误码"
+                "（通常是接口形态有变化）。\n"
                 "请确认：\n"
                 "  1. 工作流 ID 正确（从 runninghub.cn/workflow/<ID> 的 URL 里取）；\n"
                 "  2. 工作流已经保存过（草稿状态的工作流无法被调用）；\n"
@@ -1359,179 +1581,109 @@ class RunningHubWorkflowInspector:
         return ("\n".join(lines),)
 
 
-# ---------------------------------------------------------------------------
-# 节点 6-8：音视频复合 latent（MiniMax H3）
-# ---------------------------------------------------------------------------
-#
-# 背景：MiniMax H3 这类「一次生成视频+音频」的模型，它的 latent 不是单个张量，
-# 而是 comfy.nested_tensor.NestedTensor((视频 latent, 音频 latent))。
-#
-# 原生 SaveLatent 里有一行 samples["samples"].contiguous()，而 NestedTensor 是
-# 纯 Python 容器、根本没有 contiguous 方法，所以直接报
-#   AttributeError: 'NestedTensor' object has no attribute 'contiguous'
-# 这不是接线错误，是原生节点没覆盖这种数据结构。
-#
-# 下面三个节点就是为此准备的：保存（替代原生 SaveLatent）、拆分（分别解码）、
-# 合并（重新组装回 NestedTensor）。
+def _human_size(num_bytes: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if num_bytes < 1024 or unit == "GB":
+            return f"{num_bytes:.1f} {unit}" if unit != "B" else f"{num_bytes:.0f} B"
+        num_bytes /= 1024
+    return f"{num_bytes:.1f} GB"
 
 
-class RunningHubAVLatentSplit:
-    """把音视频复合 latent 拆成视频 / 音频两条，供各自的 VAE 解码。"""
+class RunningHubCacheManager:
+    """查看 / 清理本插件的 latent 缓存，并回看最近任务的积分消耗台账。
 
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {"samples": ("LATENT",)}}
-
-    RETURN_TYPES = ("LATENT", "LATENT")
-    RETURN_NAMES = ("video", "audio")
-    FUNCTION = "split"
-    CATEGORY = CATEGORY
-    TITLE = "RH AV Latent 拆分"
-    DESCRIPTION = (
-        "把 MiniMax H3 的音视频复合 latent 拆成视频 latent 和音频 latent。\n"
-        "视频接 VAEDecode（H3 视频 VAE），音频接 VAEDecodeAudio（H3 音频 VAE）。\n"
-        "原生 VAEDecode 遇到复合 latent 时只解视频、静默丢弃音频，所以必须拆开。"
-    )
-
-    def split(self, samples: dict) -> Tuple[dict, dict]:
-        inner = (samples or {}).get("samples")
-        if not latent_mod.is_nested(inner):
-            raise RHUserError(
-                "输入的不是音视频复合 latent（NestedTensor），无需拆分。\n"
-                "普通工作流的 latent 是单个张量，直接接 VAEDecode 即可。\n"
-                "如果你确实在跑 MiniMax H3，请检查上游是否真的是 H3 采样器的输出。"
-            )
-        parts = list(inner.unbind())
-        if len(parts) < 2:
-            raise RHUserError(
-                f"复合 latent 里只有 {len(parts)} 个张量，无法拆出音频。\n"
-                "请确认上游是 H3 采样器的输出，而不是被其它节点改写过。"
-            )
-        video, audio = parts[0], parts[1]
-        noise_mask = (samples or {}).get("noise_mask")
-        out_video: Dict[str, Any] = {"samples": video}
-        out_audio: Dict[str, Any] = {"samples": audio}
-        if noise_mask is not None:
-            out_video["noise_mask"] = noise_mask
-        return (out_video, out_audio)
-
-
-class RunningHubAVLatentMerge:
-    """把视频 latent + 音频 latent 重新组装成音视频复合 latent。"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {"video": ("LATENT",)},
-            "optional": {"audio": ("LATENT",)},
-        }
-
-    RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("samples",)
-    FUNCTION = "merge"
-    CATEGORY = CATEGORY
-    TITLE = "RH AV Latent 合并"
-    DESCRIPTION = (
-        "把视频 latent 与音频 latent 组装回音视频复合 latent（NestedTensor）。\n"
-        "用于需要完整复合 latent 的下游节点（例如 H3 latent 放大 / 二次采样）。\n"
-        "若只是为了分别解码，用「RH AV Latent 拆分」即可，不需要合并。"
-    )
-
-    def merge(self, video: dict, audio: Optional[dict] = None) -> Tuple[dict]:
-        v = (video or {}).get("samples")
-        if v is None:
-            raise RHUserError("video 输入为空。")
-        if audio is None:
-            return (video,)
-        a = (audio or {}).get("samples")
-        if a is None:
-            return (video,)
-        merged: Dict[str, Any] = {"samples": latent_mod.make_nested(v, a)}
-        return (merged,)
-
-
-class RunningHubAVLatentSave:
-    """替代原生 SaveLatent —— 能存原生节点存不了的音视频复合 latent。"""
-
-    def __init__(self):
-        self.output_dir = None
-        if folder_paths is not None:
-            try:
-                self.output_dir = folder_paths.get_output_directory()
-            except Exception:  # pragma: no cover
-                self.output_dir = None
+    缓存命中 = 同参数重跑不花钱，所以默认 512MB 上限内自动保留；
+    想立刻释放磁盘或强制下次重新生成时用「清理」。
+    台账（runninghub_ledger.jsonl）记录每次任务的 taskId / 积分 / 用时，
+    存放在 ComfyUI 的 output 目录，方便对账。
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "samples": ("LATENT",),
-                "filename_prefix": ("STRING", {"default": "latents/MiniMaxH3"}),
+                "action": (
+                    ["查看", "清理"],
+                    {
+                        "default": "查看",
+                        "tooltip": (
+                            "查看：列出缓存占用与最近任务台账（不改动任何文件）。\n"
+                            "清理：删除全部 latent 缓存文件（不动台账历史）。"
+                            "下次同参数任务会重新花钱跑云端。"
+                        ),
+                    },
+                ),
             },
-            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("LATENT",)
-    RETURN_NAMES = ("samples",)
-    FUNCTION = "save"
-    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "run"
     CATEGORY = CATEGORY
-    TITLE = "RH AV Latent 保存"
+    TITLE = "RH 缓存管理"
     DESCRIPTION = (
-        "保存音视频复合 latent（MiniMax H3）。原生 SaveLatent 遇到这类 latent 会报\n"
-        "'NestedTensor' object has no attribute 'contiguous'，本节点用来替代它。\n"
-        "扩展名沿用 .latent，云端平台才会把它当作 latent 输出收录到任务结果里。\n"
-        "普通单张量 latent 也能存（此时等价于原生 SaveLatent）。"
+        "查看 / 清理 latent 磁盘缓存，并回看最近任务的积分消耗与用时台账。\n"
+        "输出接到「展示任何」类节点即可阅读。"
     )
 
-    def save(
-        self,
-        samples: dict,
-        filename_prefix: str = "latents/MiniMaxH3",
-        prompt=None,
-        extra_pnginfo=None,
-    ):
-        if self.output_dir is None:
-            raise RHUserError(
-                "拿不到 ComfyUI 输出目录（folder_paths 不可用）。请确认本节点运行在 ComfyUI 内。"
+    @_guarded("RH 缓存管理")
+    def run(self, action: str = "查看", unique_id: Any = None) -> Tuple[str]:
+        action = str(action or "查看").strip()
+        cache_dir = cache_mod.get_cache_dir()
+        files: List[str] = []
+        total = 0
+        if os.path.isdir(cache_dir):
+            for name in os.listdir(cache_dir):
+                path = os.path.join(cache_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                if name.endswith(".latent"):
+                    files.append(path)
+                    total += os.path.getsize(path)
+
+        lines: List[str] = [f"缓存目录：{cache_dir}"]
+        if action == "清理":
+            removed = 0
+            freed = 0
+            for path in files:
+                try:
+                    freed += os.path.getsize(path)
+                    os.remove(path)
+                    removed += 1
+                except OSError as exc:
+                    lines.append(f"  跳过（文件被占用）：{os.path.basename(path)}（{exc}）")
+            # 半截的 .tmp 一并扫掉
+            if os.path.isdir(cache_dir):
+                for name in os.listdir(cache_dir):
+                    if name.endswith(".tmp"):
+                        try:
+                            os.remove(os.path.join(cache_dir, name))
+                        except OSError:
+                            pass
+            lines.insert(1, f"已清理 {removed} 个缓存文件，释放 {_human_size(freed)}。")
+            lines.insert(
+                2,
+                f"缓存上限仍为 {cache_mod._max_cache_mb():.0f}MB"
+                "（config.ini 的 cache_max_mb，设 0 关闭自动清理）。",
             )
-        inner = (samples or {}).get("samples")
-        if inner is None:
-            raise RHUserError("输入的 latent 为空。")
-
-        full_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
-            filename_prefix, self.output_dir
-        )
-        file = f"{filename}_{counter:05}_.latent"
-        path = os.path.join(full_folder, file)
-
-        metadata = {}
-        if prompt is not None:
-            metadata["prompt"] = json.dumps(prompt)
-        for key, value in (extra_pnginfo or {}).items():
-            metadata[str(key)] = json.dumps(value)
-
-        if latent_mod.is_nested(inner):
-            parts = list(inner.unbind())
-            if len(parts) < 2:
-                raise RHUserError(
-                    f"复合 latent 只有 {len(parts)} 个张量，至少需要视频+音频两个。"
-                )
-            latent_mod.save_av_latent(path, parts[0], parts[1], metadata=metadata)
         else:
-            # 单张量：按原生 SaveLatent 的格式写，保证 LoadLatent 也能读
-            payload = {
-                "latent_tensor": inner.detach().to("cpu").contiguous(),
-                "latent_format_version_0": torch.tensor([]),
-            }
-            safetensors.torch.save_file(payload, path, metadata=metadata)
+            max_mb = cache_mod._max_cache_mb()
+            lines.append(
+                f"当前缓存：{len(files)} 个文件，共 {_human_size(total)}"
+                f"（自动清理上限 {max_mb:.0f}MB，设 0 关闭）"
+            )
+            lines.append("说明：缓存键 = 工作流 + 全部参数，同参数重跑直接复用、不花积分。")
 
-        return {
-            "ui": {
-                "latents": [{"filename": file, "subfolder": subfolder, "type": "output"}]
-            },
-            "result": (samples,),
-        }
+        lines.append("")
+        records = ledger_mod.read_records(limit=10)
+        if records:
+            lines.append(f"最近 {len(records)} 次任务台账（新→旧，完整文件见 output 目录）：")
+            lines.extend("  " + ledger_mod.format_record(r) for r in records)
+        else:
+            lines.append("台账为空：还没有成功/失败的任务记录。")
+
+        return ("\n".join(lines),)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1540,9 +1692,7 @@ NODE_CLASS_MAPPINGS = {
     "RunningHubLatentFetch": RunningHubLatentFetch,
     "RunningHubLatentFromUrl": RunningHubLatentFromUrl,
     "RunningHubWorkflowInspector": RunningHubWorkflowInspector,
-    "RunningHubAVLatentSplit": RunningHubAVLatentSplit,
-    "RunningHubAVLatentMerge": RunningHubAVLatentMerge,
-    "RunningHubAVLatentSave": RunningHubAVLatentSave,
+    "RunningHubCacheManager": RunningHubCacheManager,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

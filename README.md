@@ -1,5 +1,8 @@
 # ComfyUI-RunningHub-Latent
 
+[![tests](https://github.com/liangqi789654258-pixel/ComfyUI-RunningHub-Latent/actions/workflows/tests.yml/badge.svg)](https://github.com/liangqi789654258-pixel/ComfyUI-RunningHub-Latent/actions/workflows/tests.yml)
+![license](https://img.shields.io/badge/license-MIT-blue)
+
 把 **RunningHub 云端当作远程采样器** 用：云端跑完采样后只回传 latent，
 **VAE 解码全部在本地完成**，最终输出 ComfyUI 原生 `LATENT`。
 
@@ -27,15 +30,50 @@
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/<你的账号>/ComfyUI-RunningHub-Latent.git
+git clone https://github.com/liangqi789654258-pixel/ComfyUI-RunningHub-Latent.git
 cd ComfyUI-RunningHub-Latent
 pip install -r requirements.txt
 ```
 
-重启 ComfyUI，在节点列表里搜索 **RunningHub** 分类即可看到 8 个节点。
+重启 ComfyUI，在节点列表里搜索 **RunningHub** 分类即可看到 6 个节点。
 
 > 三个依赖（requests / safetensors / numpy）在标准 ComfyUI 环境中都已存在，
 > 这一步通常只会提示「已满足」。
+
+## 仓库里的两个东西
+
+本仓库同时提供两种用法，**共用同一份 `core/` 实现**（不是两份代码）：
+
+| 目录 | 是什么 | 适合 |
+|---|---|---|
+| 根目录 | ComfyUI 插件：在画布上拖节点出图 | 已经在用 ComfyUI 的人 |
+| [`desktop/`](desktop/README.md) | 独立出图器（PySide6 桌面程序，**不用打开 ComfyUI**） | 只想填参数出图、不想搭画布的人 |
+
+桌面版复用 ComfyUI 自带的 Python 环境（`desktop/install.bat` 会自动找），
+不需要另装 torch。它的 API Key 存在自己的 `desktop/data/app_config.json`，
+**不会**去读插件的 `config.ini`——两边各配一次，这是故意的：
+公开程序不做「从别处默默捞 Key」这种隐式路径。
+（设置里有一键「从插件 config.ini 导入」按钮，想省事就点它，但那是显式操作。）
+
+### 界面预览
+
+| 图像模式 | 视频模式 |
+|---|---|
+| ![图像模式](docs/images/app-image-mode.png) | ![视频模式](docs/images/app-video-mode.png) |
+
+![任务台账](docs/images/app-ledger.png)
+
+> 截图里的作品是程序生成的占位色块，不是任何人的实际产出。
+
+**桌面版还做了什么**
+
+- **启动自检**：ComfyUI 路径 / 插件目录 / VAE / ffmpeg / Key 一次查完，缺哪项直接给修复入口
+  （新用户最容易卡在这四项，以前得挨个踩一遍才知道）
+- **任务台账**：每次云端调用都落一条 jsonl，界面里可看时间 / 任务号 / 积分 / 耗时 / 失败原因
+- **成本护栏**：设一个每日积分上限，超过后生成前先确认（按台账统计当日消耗）
+- **系统托盘 + 通知**：出视频要等几分钟，最小化后完成 / 失败会弹系统通知
+- **按 taskId 续取**：超时、断网、手滑关窗口都能把已付费的结果捞回来，不重新提交
+- **命令行可跑**：`desktop/` 下 9 个测试脚本全部离线，不花积分、不碰 GPU
 
 ## 快速开始
 
@@ -109,7 +147,12 @@ pip install -r requirements.txt
 
 ### 不想每次都粘贴 API Key？
 
-把 `config.example.ini` 复制成 `config.ini` 并填写（旧的 `config.json` 继续兼容）：
+**推荐做法：右键任意本插件节点 →「设置 API Key」。**
+Key 只会写进插件目录的 `config.ini`，不进工作流、不进导出、不进图片元数据。
+设置好之后，节点上的输入框会一直显示 `已配置 · 使用 config.ini`，
+重启 ComfyUI 或重新加载工作流都不会变空，**不需要再填第二次**。
+
+也可以直接改文件（旧的 `config.json` 继续兼容）：
 
 ```ini
 [runninghub]
@@ -120,8 +163,29 @@ timeout = 600
 poll_interval = 5
 ```
 
-优先级：**节点显式输入 > config.ini > config.json > 内置默认值**。
-临时换 Key 试跑不会被配置绑架。两个配置文件都已被 `.gitignore` 排除。
+优先级：**节点显式输入（真 Key）> config.ini > config.json > 内置默认值**。
+节点输入框里那个 `已配置 · 使用 config.ini` 是状态标签，会被自动跳过，
+不会被当成 Key 用。两个配置文件都已被 `.gitignore` 排除。
+
+> 设计取舍与「为什么不用遮罩」详见 [`docs/key-handling.md`](docs/key-handling.md)。
+
+### 分享给别人 / 发布前自检
+
+**别人拿到这份插件不会继承你的 Key**：`config.ini` 是本机文件，用 git 分享时被
+`.gitignore` 排除；对方第一次执行会看到「未配置」，右键设置一次自己的 Key 即可，
+之后同样永久生效（和你在本机的体验一致）。
+
+唯一的坑是**用 zip 直接压目录发人**——那样 `config.ini` 会被一起打包。
+分享前跑一次自检：
+
+```bash
+cd ComfyUI-RunningHub-Latent
+python tools/check_share_ready.py        # 只检查，列出不该带出去的文件
+python tools/check_share_ready.py --fix  # 顺手清掉本机专属文件（会提示先备份 Key）
+```
+
+`tests/test_package.py` 里还有一道常驻检查：**本机配置的 Key 一旦出现在任何要发布的
+文件里（源码 / 文档 / 示例 / 测试）就直接报错**，防止手滑把真 Key 写进示例。
 
 ## 节点一览
 
@@ -132,9 +196,7 @@ poll_interval = 5
 | **RH 按任务号取回 Latent** | 用已有 taskId 重新拉取（超时续取、换会话复用） | 所有人都该知道有这个 |
 | **RH 从 URL 加载 Latent** | 直接给一个 latent 下载链接加载（手动下载场景） | 手动下载场景 |
 | **RH 工作流参数探查** | 拉取云端工作流结构与可改参数，并判断能否自动定位 | 第一次配某条工作流时 |
-| **RH AV Latent 保存** | 替代原生「保存Latent」，能存 MiniMax H3 的音视频复合 latent | 本地跑 H3 / 自建云端时（RunningHub 不允许装自定义节点，见下） |
-| **RH AV Latent 拆分** | 把复合 latent 拆成视频 / 音频两条，分别解码 | H3 本地解码必用 |
-| **RH AV Latent 合并** | 把视频 + 音频 latent 组装回复合 latent | 二采 / latent 放大 |
+| **RH 缓存管理** | 查看 / 清理本地 latent 缓存，显示最近若干次任务台账 | 想省积分、想查历史任务 |
 
 > **平台限制（2026-09-30 确认）**：RunningHub 云端**不接受用户上传安装自定义节点**，
 > 所以上面这 3 个 AV 节点**装不到 RunningHub 上**。H3 在 RunningHub 上的正确用法是
@@ -362,30 +424,42 @@ VAE 解码（SDXL 的 latent 用 SD1.5 的 VAE 解码必崩）。参考云端工
 
 ```
 ComfyUI-RunningHub-Latent/
-├── __init__.py            节点注册 + WEB_DIRECTORY
-├── nodes.py               8 个节点的 UI 定义与业务流程
-├── core/
+├── __init__.py            节点注册 + WEB_DIRECTORY + Key 守卫（路由 / 服务端兜底）
+├── nodes.py               6 个节点的 UI 定义与业务流程
+├── core/                  纯库层：不依赖 ComfyUI，可离线单测
 │   ├── client.py          RunningHub OpenAPI 封装（重试 / 错误映射 / 脱敏）
-│   ├── latent.py          latent 解析，对齐原生 LoadLatent
+│   ├── latent.py          latent 解析，对齐原生 LoadLatent（含 H3 音视频复合）
 │   ├── workflow.py        工作流结构解析 + 占位符替换 + 映射校验
-│   ├── snapshot.py        S2 快照模型（字段形态 / 执行态 / 指纹 / diff）
-│   │                      ⚠ 未接入运行时：为「自动推断」路线打的地基，当前手动映射路线不消费
-│   ├── binding.py         S3 显式绑定 + 漂移检测
-│   │                      ⚠ 未接入运行时：纯库（见 docs/binding-r1.md），节点层尚未使用
-│   ├── cache.py           按参数哈希的本地 latent 缓存
-│   └── settings.py        config.ini / config.json 读取
+│   ├── mapping.py         参数映射解析 + 占位符替换（出图器共用同一份实现）
+│   ├── output.py          云端输出分类 / latent 收集 / 多 latent 合并（出图器共用）
+│   ├── errors.py          四段式用户错误（问题类型 / 失败环节 / 上下文 / 排查步骤）
+│   ├── cache.py           按参数哈希的本地 latent 缓存 + 下载重试
+│   ├── ledger.py          任务台账（output 目录下的 jsonl）
+│   └── settings.py        config.ini / config.json 读取与 Key 存取
 ├── web/
-│   └── rh_warning.js      前端扩展：警告时给节点上色、拉高提示词输入框
-├── tests/
-│   ├── test_core.py       核心逻辑冒烟测试（177 项，不需要 API Key）
-│   ├── test_snapshot.py   发现层快照模型自测（101 项，不需要 torch / API Key）
-│   ├── test_binding.py    显式绑定与漂移检测自测（134 项）
-│   ├── test_s0_fixtures.py 九类形态 fixture 回归测试（693 项）
-│   └── test_package.py    交付物一致性检查（节点定义 vs 示例工作流）
-├── examples/              4 份示例工作流（极简 / 专业 / 视频 / 二采）
+│   └── rh_key_guard.js    前端扩展：警告给节点上色、拉高提示词框、Key 遮罩与序列化剥离
+├── tests/                 全部离线可跑（不需要 API Key，大部分不需要 torch）
+│   ├── test_core.py       核心逻辑：解析 / 缓存 / 状态机 / 注入校验
+│   ├── test_errors.py     错误渲染与分类
+│   ├── test_keyvault.py   API Key 存取与脱敏
+│   ├── test_s0_fixtures.py 九类工作流形态 fixture 回归
+│   ├── test_package.py    交付物一致性（节点定义 vs 示例工作流）
+│   └── fixtures/          上述用例的结构数据与基线快照
+├── examples/              5 份示例工作流（极简 / 专业 / 视频 / 二采 / H3 音视频）
+├── docs/                  h3-av-latent / video-guide / platform-contract /
+│                          injection-architecture（设计存档，含回退记录）
+├── desktop/               独立出图器（PySide6，复用 ComfyUI 的 Python 环境）
+├── docs/images/           README 截图
+├── .github/workflows/     CI：插件 5 个套件 + 桌面 6 个离线套件
+├── tools/                 开发者脚本（非运行必需）：probe_platform / capture_baseline /
+│                          check_share_ready（分享前自检）/ build_release（一键出包）
 ├── config.example.ini
 └── config.example.json
 ```
+
+> 关于 `core/snapshot.py` / `core/binding.py`：这两个模块曾在 2026-10 存在，
+> 是「自动推断提示词落点」路线的地基，后因该路线被判定为静默失效风险过高而
+> **连同测试一并移除**。设计过程保留在 `docs/injection-architecture.md`。
 
 ## 运行自测
 
@@ -393,14 +467,31 @@ ComfyUI-RunningHub-Latent/
 
 ```bash
 cd ComfyUI-RunningHub-Latent
-python tests/test_core.py      # 核心逻辑 104 项断言
-python tests/test_snapshot.py  # 发现层快照模型 101 项断言（不依赖 torch）
-python tests/test_package.py   # 节点定义与示例工作流是否一致
+
+# 核心逻辑（需要 torch）：解析 / 缓存 / 状态机 / 注入校验
+python tests/test_core.py
+
+# 纯离线、不需要 torch 的部分
+python tests/test_errors.py      # 错误渲染与分类
+python tests/test_keyvault.py    # API Key 存取与脱敏
+python tests/test_s0_fixtures.py # 九类工作流形态 fixture 回归
+python tests/test_package.py     # 节点定义与示例工作流是否一致
 ```
 
-`test_core.py` 用真实的 safetensors 文件验证 latent 解析的新旧格式与缩放行为，
-用 mock session 走完「排队 → 运行 → 成功 / 失败 / 空结果补查」的完整状态机，
-并覆盖提示词替换、种子定位、映射校验、config.ini 解析等全部新增逻辑。
+桌面版在 `desktop/` 下另有一套（不需要 API Key）：
+
+```bash
+cd desktop
+python tests_i18n.py            # 中英文案完整性（缺 key 会直接显示裸 key）
+python tests_ui.py              # 自检 / 台账 / 成本护栏 / 设置项
+python tests_runner.py          # 生成编排：假客户端跑完提交→轮询→取回→落盘
+python tests_embed.py           # PNG/mp4 元数据写入与读回
+python tests_thumbs.py          # 作品栏缩略图（含刷新回归）
+python tests_gui_offscreen.py   # 界面能正常构建
+```
+
+全部为脚本式自测：任一断言失败即非零退出并打印失败项。
+上面这些在 GitHub Actions 里每次提交都会跑（`.github/workflows/tests.yml`）。
 
 ## 设计说明
 

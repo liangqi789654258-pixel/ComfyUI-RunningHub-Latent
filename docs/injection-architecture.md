@@ -1,8 +1,18 @@
 # 通用型云端采样节点：参数注入架构评估与重构方案
 
-> 状态：方案稿，**待评审**，不含代码级修改
-> 日期：2026-10-05
-> 约束：兼容任意第三方工作流；**禁止**针对单个工作流硬编码节点 ID 或固定字段路径
+> 状态：**设计存档**。本文记录 2026-10 对「通用注入」路线的评估与子任务拆解，
+> 其中只有一部分真正落地，其余是已被否决/搁置的方案。
+> **当前实际实现请以 `nodes.py` 与 `core/workflow.py` 为准**，不要照着本文找代码。
+>
+> 落地情况速查（2026-10-19 核对）：
+> - ✅ 落地：占位符替换（`core/workflow.py`）、手工映射校验、S0 fixture 基线、
+>   803 逐条定位、`normalize()` 保留 `_meta` / 节点标题。
+> - ❌ 未落地：S2 独立快照模块 `core/snapshot.py`、S3 显式绑定模块 `core/binding.py`、
+>   S4–S11 的自动推断路线。**这两个模块已被移除**，相关能力没有替代实现
+>   （`normalize()` 只保留了 `meta`，不含字段形态标注与 diff）。
+> - 结论：「沿连线自动猜提示词落点」被判定为静默失效风险过高，已推倒为**纯手动映射**。
+>
+> 日期：2026-10-05 ｜ 约束：兼容任意第三方工作流；**禁止**针对单个工作流硬编码节点 ID
 
 ---
 
@@ -164,7 +174,7 @@ StructuralSlot（结构槽位：nodeId + fieldName）   ← 唯一由平台理�
 |---|---|---|---|
 | **S0** | **根因固化为可执行复现** | 把"正向可注入"与"不可注入"两类形态做成离线 fixture（纯结构数据，不依赖真实额度） | fixture 覆盖：①直连编码；②中间透传节点；③多源汇聚；④分支/旁路；⑤派生（计算）来源；⑥无占位符 vs 有占位符；⑦多采样器。当前实现在这些 fixture 上的行为被固化成基线快照 |
 | **S1** | **平台契约盘点（纯调研交付）** ✅ **已完成** | 查清 6 个事实，形成书面契约表 | 输出并核实：①`getJsonApiFormat` 对任意工作流是否返回全量节点与inputs；②是否存在平台参数schema接口；③注入不存在 nodeId/fieldName 时的错误码与行为（是否硬失败）；④注入**存在但被连线接管**的字段时是否报错；⑤create 响应能否回显已应用的注入；⑥有无低成本 dry-run/最小步数通道。<br>**结论见 [`platform-contract.md`](platform-contract.md)**：①②③⑤⑥ 已由官方文档取证；④（注入连线字段的行为）文档无法判定，已给出 L0–L4 分层真机验证方案与脚本 `tools/probe_platform.py` |
-| **S2** | **发现层（Discovery）+ Snapshot 模型** ✅ **已完成** | 把"结构拉取"变成带标注的结构化快照，可 diff/可缓存/可落盘 | 对任一工作流产出：节点清单、每字段 `value_kind`、节点执行态、`[]` 连线边列表；同一工作流两次快照一致；结构变化可被 diff 检出。<br>**实现见 [`snapshot-model.md`](snapshot-model.md)**：模块 `core/snapshot.py`，自测 `tests/test_snapshot.py`（101 项全绿，含与既有 `normalize()` 路径的交叉一致性比对） |
+| **S2** | **发现层（Discovery）+ Snapshot 模型** ⚠️ **已回退** | 把"结构拉取"变成带标注的结构化快照，可 diff/可缓存/可落盘 | 曾以 `core/snapshot.py` + `tests/test_snapshot.py` 实现；**2026-10 已移除该模块**（手动映射路线不消费它，维护成本不划算）。保留的收益只有 `workflow.normalize()` 里的 `meta`（含 `_meta.title`），字段形态标注与 diff 能力**当前不存在** |
 | **S3** | **Binding 数据模型 + 显式绑定（R1）+ 漂移检测** | 支持手动/固化绑定（每端口每工作流），并能在漂移时报错 | 无推断情况下，任意工作流仅需配置映射即可 100% 生效；人为修改 nodeId 后能报"绑定漂移"而非静默失效；绑定可导出/导入 |
 | **S4** | **解析器：占位符泛化（R3）** | 支持任意 `{token}`，自动推导注入端口 | 在 S0 fixture 上验证：工作流出现新 token 时自动成为可注入端口；无 token 时明确输出"未声明协议"而不是猜 |
 | **S5** | **解析器：结构求解（R4）** | 纯图分析求解 SemanticPort，含穿越中间节点、派生值上溯、歧义裁决/上报 | 在 S0 的 ①–⑦ 上：可唯一确定时能给出正确落点+证据路径；不可判定时**必须**产出歧义报告（含候选与理由），不得静默取第一个 |
@@ -189,67 +199,32 @@ StructuralSlot（结构槽位：nodeId + fieldName）   ← 唯一由平台理�
 > 注：本轮未修改任何插件代码。上述 S* 子任务确认优先级与负责人后，建议按 `S0 → S1/S2 → S3` 的顺序进入实施。
 
 ---
+## 六、S2 落地与回退记录
 
-## 六、S2 实现落地说明
+### 6.1 落地过什么
 
-> 本节记录 S2 的实际落地形态，供 S3–S8 直接引用。完整字段表与判定规则见
-> [`snapshot-model.md`](snapshot-model.md)。
+`core/snapshot.py` 曾实现过完整的快照模型（字段形态标注 `value_kind`、节点执行态、
+取值指纹 / 拓扑指纹、`diff_snapshots` 漂移检出），配 `tests/test_snapshot.py`。
+同期的 `core/binding.py` 在其上做了显式绑定与漂移检测。
 
-**实际模块：`core/snapshot.py`**（`core/workflow.py:normalize()` 同步保留 `_meta` 与
-节点直属执行态字段到 `meta` 键；`class_type` / `inputs` 两键未变，既有调用方无感）。
+### 6.2 为什么移除（2026-10）
 
-### 6.1 公开 API
+1. **没有消费方**：这两个模块是给「自动推断落点」路线打的地基。该路线在
+   v1.3.x 被判定为**静默失效风险过高**（猜错落点 = 用户以为生效了，实际没送上去），
+   已推倒为纯手动映射。地基失去了上层建筑。
+2. **维护成本大于收益**：快照模型要跟着平台返回结构的变化持续适配，
+   但当前没有任何代码路径依赖它。
+3. 因此 `core/snapshot.py`、`core/binding.py`、`tests/test_snapshot.py`、
+   `tests/test_binding.py` 一并删除，**没有任何替代实现**。
 
-| 类别 | API |
+### 6.3 当前真正保留的
+
+| 能力 | 位置 |
 |---|---|
-| 构建 | `build_snapshot(raw, workflow_id="")` · `snapshot_from_structure(structure, workflow_id="")` |
-| 查询 | `WorkflowSnapshot.node(node_id)` · `slot(node_id, field)` · `injectable_slots()` · `links_into(node_id)` · `links_from(node_id)` |
-| 指纹 | `fingerprint()`（含取值）· `topology_fingerprint()`（不含取值） |
-| diff | `diff_snapshots(old, new) -> List[DiffEntry]` · `has_breaking_change(entries)` · `summarize_diff(entries)` |
-| 序列化 | `to_dict` / `from_dict` / `to_json` / `from_json` / `to_structure()`（还原成既有归一化结构） |
-| 数据类 | `WorkflowSnapshot` / `NodeSnapshot` / `FieldSnapshot` / `Edge` / `DiffEntry` |
+| 结构归一化（含 `_meta` 与节点标题） | `core/workflow.py:normalize()` |
+| 占位符替换 | `core/workflow.py` + `core/mapping.py` |
+| 映射逐条校验 / 803 定位 | `core/workflow.py:diagnose_injections()` |
+| 显式绑定 | **不存在**——用 `node_overrides` 手工指定，等价于每次都显式绑一次 |
 
-客户端入口：`RunningHubClient.get_workflow_snapshot(workflow_id)`（带进程内缓存）。
-
-**边界：本层只有「查询 + 序列化 + diff」三类方法，没有任何拓扑推断或入参反推。**
-
-### 6.2 `has_breaking_change` 的判定口径
-
-| diff 类型 | breaking | 理由 |
-|---|---|---|
-| 删除节点 | ✅ | 绑定指向的 nodeId 消失，平台会返回 803 硬失败 |
-| 节点类型变化 | ✅ | 同一 nodeId 换了类型，字段语义可能全变 |
-| 删除字段 | ✅ | 绑定指向的 fieldName 消失 |
-| 字段形态 `literal → link/unknown` | ✅ | 违反不变量 A，按平台规则不再可注入 |
-| 执行态 `active → bypassed/muted` | ✅ | 违反不变量 B，注入不会被执行 |
-| 新增节点 / 新增字段 / 标题变化 / 连线改向 | ❌ | 既有绑定仍成立，只需记录 |
-| **只改默认值** | ❌ | **绑定的地址（nodeId + fieldName）没变、字段仍是字面量，注入照旧生效；变的只是「用户没注入时跑什么默认值」。若这也算漂移，用户每改一次云端提示词都要重新解析一次绑定，噪音远大于收益** |
-
-### 6.3 `exec_state` 缺失时的取向
-
-平台没有统一暴露节点执行态。发现层的判定顺序是 `mode` 常量 → mute/bypass 布尔字段 →
-**都没有时按 `active` 处理，并把 `exec_source` 记为 `"default"`**。
-
-> ⚠️ **`default` 是假设，不是平台明示。** 依据是「API-format 通常已剔除被静音节点」这一
-> 经验，而非任何平台文档。发现层如实记录证据等级（`exec_source` / `exec_evidence`），
-> 不允许把假设当事实往下游传。
-> **S6 校验器可能据此要求用户显式确认**：当落点的 `exec_source == "default"` 时，
-> 可以选择要求用户确认后再放行（是否这么做由 S6 决定，S2 只提供证据等级）。
-
-### 6.4 移交给 S3 的契约
-
-- Binding 的最小三元组：**`(workflow_id, node_id, field_name)`**（只绑 nodeId 会在换工作流后串味）。
-- 漂移检测：固化绑定时存下当时的 `fingerprint()`；每次运行重新 `build_snapshot()` 后比对，
-  不一致即视为漂移候选，再用 `has_breaking_change(diff_snapshots(...))` 决定是否报警。
-- 固化/导入时校验槽位合法性：`slot()` 存在 + `value_kind == literal` + `node.is_executing`。
-- 平台侧还有一条零成本负向通道：绑定写错 → 提交阶段 **803 硬失败**（见
-  [`platform-contract.md`](platform-contract.md) 事实 3），可与指纹检测互为兜底。
-
-### 6.5 S2 **未提供**的能力（S3 不要假定它们存在）
-
-- ❌ 没有 `walk_upstream` / 上游回溯；
-- ❌ 没有拓扑反推、没有「语义端口 → 槽位」的解析；
-- ❌ 没有多源汇聚裁决、分支可达性剪枝、派生值上溯。
-
-以上全部属于 **S5（R4 结构求解）**。S3 只需要显式绑定 + 漂移检测这条最保守的路线，
-不依赖任何推断能力即可 100% 可用（这也是本方案把 R1 排在首位的原因）。
+> 结论：**不要照本文第五节之后的 S* 计划去找代码**。如果要重新捡起自动推断，
+> 请把它当作一个全新方案重新评估，而不是"恢复某个已删模块"。
