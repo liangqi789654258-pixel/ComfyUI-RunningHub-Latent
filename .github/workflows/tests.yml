@@ -91,6 +91,7 @@ jobs:
           python tests_i18n.py 2>&1 | tee /tmp/out_1.txt
           code=${PIPESTATUS[0]}
           if [ $code -ne 0 ]; then
+            tail -12 /tmp/out_1.txt | while IFS= read -r line; do echo "::error title=FAIL-1::$line"; done
             { echo '```'; tail -50 /tmp/out_1.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $code
@@ -105,6 +106,7 @@ jobs:
           python tests_ui.py 2>&1 | tee /tmp/out_2.txt
           code=${PIPESTATUS[0]}
           if [ $code -ne 0 ]; then
+            tail -12 /tmp/out_2.txt | while IFS= read -r line; do echo "::error title=FAIL-2::$line"; done
             { echo '```'; tail -50 /tmp/out_2.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $code
@@ -119,6 +121,7 @@ jobs:
           python tests_runner.py 2>&1 | tee /tmp/out_3.txt
           code=${PIPESTATUS[0]}
           if [ $code -ne 0 ]; then
+            tail -12 /tmp/out_3.txt | while IFS= read -r line; do echo "::error title=FAIL-3::$line"; done
             { echo '```'; tail -50 /tmp/out_3.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $code
@@ -133,6 +136,7 @@ jobs:
           python tests_embed.py 2>&1 | tee /tmp/out_4.txt
           code=${PIPESTATUS[0]}
           if [ $code -ne 0 ]; then
+            tail -12 /tmp/out_4.txt | while IFS= read -r line; do echo "::error title=FAIL-4::$line"; done
             { echo '```'; tail -50 /tmp/out_4.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $code
@@ -147,6 +151,7 @@ jobs:
           python tests_thumbs.py 2>&1 | tee /tmp/out_5.txt
           code=${PIPESTATUS[0]}
           if [ $code -ne 0 ]; then
+            tail -12 /tmp/out_5.txt | while IFS= read -r line; do echo "::error title=FAIL-5::$line"; done
             { echo '```'; tail -50 /tmp/out_5.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $code
@@ -161,6 +166,7 @@ jobs:
           python tests_gui_offscreen.py 2>&1 | tee /tmp/out_6.txt
           code=${PIPESTATUS[0]}
           if [ $code -ne 0 ]; then
+            tail -12 /tmp/out_6.txt | while IFS= read -r line; do echo "::error title=FAIL-6::$line"; done
             { echo '```'; tail -50 /tmp/out_6.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $code
