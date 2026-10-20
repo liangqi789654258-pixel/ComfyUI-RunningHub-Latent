@@ -11,3 +11,10 @@ venv/
 .idea/
 .vscode/
 *.log
+
+# 本地排障临时文件
+*.html.tmp
+job.html
+wf.html
+run.html
+jobs.json
