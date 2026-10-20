@@ -137,22 +137,32 @@ class StatusLabelTests(unittest.TestCase):
         self.assertTrue(any(ord(ch) > 127 for ch in label))
 
     def test_resolve_api_key_ignores_label(self):
-        """传标签时应回落配置；没有配置时返回空串（由调用方报错）。"""
-        # 用临时配置文件，避免受本机真实 config.ini 影响
-        import tempfile
+        """传标签时应回落配置里的 Key。
 
-        with tempfile.TemporaryDirectory() as tmp:
-            ini = os.path.join(tmp, "config.ini")
-            with open(ini, "w", encoding="utf-8") as fh:
-                fh.write("[runninghub]\napi_key = REAL_KEY_1234567890\n")
-            settings.reload()
-            real = settings.resolve_api_key("REAL_KEY_1234567890")
-            self.assertEqual(real, "REAL_KEY_1234567890")
-            # 标签 → 视为未填 → 回落配置里的 Key
-            fallback = settings.resolve_api_key(settings.STATUS_LABEL)
-            self.assertTrue(fallback)
-            self.assertNotEqual(fallback, settings.STATUS_LABEL)
-        settings.reload()
+        不能依赖本机 config.ini——CI 上根本没有这个文件。
+        直接把 settings.get 打桩成固定值，结果才与机器无关。
+        """
+        original = settings.get
+        try:
+            settings.get = lambda key, fb=None: (
+                "REAL_KEY_1234567890" if key == "api_key" else fb
+            )
+            # 显式真 Key：优先用它
+            self.assertEqual(
+                settings.resolve_api_key("REAL_KEY_1234567890"), "REAL_KEY_1234567890"
+            )
+            # 状态标签：视为未填 → 回落配置
+            self.assertEqual(
+                settings.resolve_api_key(settings.STATUS_LABEL), "REAL_KEY_1234567890"
+            )
+            # 空串同理
+            self.assertEqual(settings.resolve_api_key(""), "REAL_KEY_1234567890")
+
+            # 配置里也没有时：返回空串，由调用方报错
+            settings.get = lambda key, fb=None: fb
+            self.assertEqual(settings.resolve_api_key(settings.STATUS_LABEL), "")
+        finally:
+            settings.get = original
 
 
 class NodeApiKeyInputTests(unittest.TestCase):

@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [master, main]
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
 
@@ -21,22 +21,22 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
-      # torch CPU 版：test_core 需要，体积约 200MB，用官方 cpu 源装最快
+      # torch CPU 版：test_core 需要；用官方 cpu 源装体积最小
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install requests safetensors numpy
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Core logic
-        run: python tests/test_core.py
-
-      - name: Errors / keyvault / fixtures / package
+      # 每个文件单独跑并打名字：失败时日志里一眼看出是哪一个
+      - name: Plugin suites
         run: |
-          python tests/test_errors.py
-          python tests/test_keyvault.py
-          python tests/test_s0_fixtures.py
-          python tests/test_package.py
+          set -e
+          for f in tests/test_core.py tests/test_errors.py tests/test_keyvault.py \
+                   tests/test_s0_fixtures.py tests/test_package.py; do
+            echo "===== $f ====="
+            python "$f"
+          done
 
   desktop:
     name: desktop (headless)
@@ -48,23 +48,46 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # Qt6 在无桌面的 Linux 上需要这些系统库，少一个就是
+      # "could not load the Qt platform plugin xcb"
+      - name: System libs for Qt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            fonts-noto-cjk
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r desktop/requirements.txt
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0
 
-      # 这些用例全部离线：不需要 API Key，也不需要 VAE 模型
+      # 先单独验一次 Qt：平台插件加载不了的话，后面 6 个套件会一起红，
+      # 这条能让失败原因一眼可见
+      - name: Qt smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -c "
+          import PySide6
+          from PySide6.QtWidgets import QApplication, QLabel
+          app = QApplication([])
+          w = QLabel('ok'); w.show()
+          print('PySide6', PySide6.__version__, '| offscreen OK')
+          "
+
       - name: Portable suites
         env:
           QT_QPA_PLATFORM: offscreen
           CUDA_VISIBLE_DEVICES: ""
         run: |
+          set -e
           cd desktop
-          python tests_i18n.py
-          python tests_ui.py
-          python tests_runner.py
-          python tests_embed.py
-          python tests_thumbs.py
-          python tests_gui_offscreen.py
+          for f in tests_i18n.py tests_ui.py tests_runner.py tests_embed.py \
+                   tests_thumbs.py tests_gui_offscreen.py; do
+            echo "===== $f ====="
+            python "$f"
+          done
